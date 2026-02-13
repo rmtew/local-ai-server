@@ -1,0 +1,3 @@
+[submodule "qwen-asr"]
+	path = qwen-asr
+	url = https://github.com/rmtew/qwen-asr.git

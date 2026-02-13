@@ -1,0 +1,145 @@
+@echo off
+REM Build local-ai-server.exe -- OpenAI-compatible local inference server
+REM Can be run from any terminal and any directory
+
+setlocal EnableDelayedExpansion
+cd /d "%~dp0"
+
+REM Auto-setup MSVC environment if not already configured
+where cl.exe >nul 2>&1
+if %ERRORLEVEL% NEQ 0 (
+    echo Setting up MSVC environment...
+    set "VSWHERE=%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe"
+    if not exist "!VSWHERE!" (
+        echo ERROR: vswhere.exe not found. Install Visual Studio with C++ workload.
+        exit /b 1
+    )
+    for /f "usebackq tokens=*" %%i in (`"!VSWHERE!" -latest -property installationPath`) do set "VSINSTALL=%%i"
+    if not defined VSINSTALL (
+        echo ERROR: Could not find Visual Studio installation
+        exit /b 1
+    )
+    call "!VSINSTALL!\VC\Auxiliary\Build\vcvarsall.bat" x64 >nul 2>&1
+    where cl.exe >nul 2>&1
+    if !ERRORLEVEL! NEQ 0 (
+        echo ERROR: Failed to initialize MSVC environment
+        exit /b 1
+    )
+)
+
+REM Paths relative to repo root
+set QWEN_ASR_DIR=qwen-asr
+set BUILD_DIR=build
+set BIN_DIR=bin
+
+REM Resolve shared deps (DEPS_ROOT required for OpenBLAS)
+if not defined DEPS_ROOT (
+    echo ERROR: DEPS_ROOT environment variable is not set.
+    echo Set it to the shared deps directory, e.g.: set DEPS_ROOT=C:\Data\R\git\claude-repos\deps
+    exit /b 1
+)
+set "OPENBLAS_DIR=%DEPS_ROOT%\openblas"
+
+REM Check prerequisites
+if not exist "%QWEN_ASR_DIR%\qwen_asr.c" (
+    echo ERROR: qwen-asr source not found at %QWEN_ASR_DIR%
+    echo Did you run: git submodule update --init
+    exit /b 1
+)
+
+REM Detect OpenBLAS (strongly recommended for performance)
+set BLAS_CFLAGS=
+set BLAS_LIBS=
+if exist "%OPENBLAS_DIR%\openblas_msvc.lib" (
+    echo OpenBLAS found -- enabling BLAS acceleration
+    set BLAS_CFLAGS=/DUSE_BLAS /I"%OPENBLAS_DIR%\include"
+    set BLAS_LIBS="%OPENBLAS_DIR%\openblas_msvc.lib"
+) else (
+    echo WARNING: OpenBLAS not found at %OPENBLAS_DIR% -- will be slow
+)
+
+REM Create output directories
+if not exist "%BUILD_DIR%" mkdir "%BUILD_DIR%"
+if not exist "%BIN_DIR%" mkdir "%BIN_DIR%"
+
+REM Detect CUDA toolkit (optional -- enables cuBLAS GPU acceleration)
+set CUDA_CFLAGS=
+set CUDA_LIBS=
+set "CUDA_DIR=C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.8"
+if exist "%CUDA_DIR%\lib\x64\cublas.lib" (
+    echo CUDA found -- enabling cuBLAS GPU acceleration
+    set CUDA_CFLAGS=/DUSE_CUBLAS /I"%CUDA_DIR%\include"
+    set CUDA_LIBS="%CUDA_DIR%\lib\x64\cublas.lib" "%CUDA_DIR%\lib\x64\cudart.lib" "%CUDA_DIR%\lib\x64\cuda.lib"
+
+    REM Try to compile CUDA kernels to CUBIN (requires nvcc)
+    if exist "%CUDA_DIR%\bin\nvcc.exe" (
+        echo Compiling CUDA kernels to CUBIN...
+        "%CUDA_DIR%\bin\nvcc.exe" -cubin -arch=sm_86 -o "%BUILD_DIR%\qwen_asr_kernels.cubin" "%QWEN_ASR_DIR%\qwen_asr_kernels.cu" 2>&1
+        if !ERRORLEVEL! EQU 0 (
+            echo Generating CUBIN header...
+            py "%QWEN_ASR_DIR%\tools\cubin_to_header.py" "%BUILD_DIR%\qwen_asr_kernels.cubin" "%QWEN_ASR_DIR%\qwen_asr_kernels_cubin.h"
+            if !ERRORLEVEL! EQU 0 (
+                set CUDA_CFLAGS=!CUDA_CFLAGS! /DUSE_CUDA_KERNELS
+                echo CUDA kernels enabled
+            ) else (
+                echo WARNING: CUBIN header generation failed -- using cuBLAS only
+            )
+        ) else (
+            echo WARNING: nvcc compilation failed -- using cuBLAS only
+        )
+    ) else (
+        echo nvcc not found -- using cuBLAS only ^(no custom kernels^)
+    )
+) else (
+    echo CUDA not found -- GPU acceleration disabled
+)
+
+REM Copy OpenBLAS DLL if not present
+if not exist "%BIN_DIR%\libopenblas.dll" (
+    if exist "%OPENBLAS_DIR%\bin\libopenblas.dll" (
+        echo Copying libopenblas.dll...
+        copy "%OPENBLAS_DIR%\bin\libopenblas.dll" "%BIN_DIR%" >nul
+    ) else if exist "%OPENBLAS_DIR%\libopenblas.dll" (
+        echo Copying libopenblas.dll...
+        copy "%OPENBLAS_DIR%\libopenblas.dll" "%BIN_DIR%" >nul
+    )
+)
+
+REM Qwen-ASR source files (excluding main.c -- server has its own entry point)
+set QWEN_SOURCES="%QWEN_ASR_DIR%\qwen_asr.c" "%QWEN_ASR_DIR%\qwen_asr_audio.c" "%QWEN_ASR_DIR%\qwen_asr_decoder.c" "%QWEN_ASR_DIR%\qwen_asr_encoder.c" "%QWEN_ASR_DIR%\qwen_asr_kernels.c" "%QWEN_ASR_DIR%\qwen_asr_kernels_avx.c" "%QWEN_ASR_DIR%\qwen_asr_kernels_generic.c" "%QWEN_ASR_DIR%\qwen_asr_safetensors.c" "%QWEN_ASR_DIR%\qwen_asr_tokenizer.c" "%QWEN_ASR_DIR%\qwen_asr_gpu.c"
+
+REM Server source files
+set SRV_SOURCES=src\main.c src\http.c src\multipart.c src\handler_asr.c src\json.c
+
+REM Compile qwen-asr sources with full optimization (inference is CPU-bound)
+echo Compiling qwen-asr (optimized)...
+cl /nologo /W3 /O2 /arch:AVX2 /fp:fast /DNDEBUG !BLAS_CFLAGS! !CUDA_CFLAGS! /I"%QWEN_ASR_DIR%" /c %QWEN_SOURCES% /Fo:"%BUILD_DIR%\\"
+if %ERRORLEVEL% NEQ 0 (
+    echo qwen-asr compilation failed.
+    exit /b 1
+)
+
+REM Compile server sources with debug info
+echo Compiling server (debug)...
+cl /nologo /W3 /Od /Zi /DDEBUG !BLAS_CFLAGS! !CUDA_CFLAGS! /I"%QWEN_ASR_DIR%" /Isrc /c %SRV_SOURCES% /Fo:"%BUILD_DIR%\\"
+if %ERRORLEVEL% NEQ 0 (
+    echo Server compilation failed.
+    exit /b 1
+)
+
+REM Collect all object files
+set QWEN_OBJS="%BUILD_DIR%\qwen_asr.obj" "%BUILD_DIR%\qwen_asr_audio.obj" "%BUILD_DIR%\qwen_asr_decoder.obj" "%BUILD_DIR%\qwen_asr_encoder.obj" "%BUILD_DIR%\qwen_asr_kernels.obj" "%BUILD_DIR%\qwen_asr_kernels_avx.obj" "%BUILD_DIR%\qwen_asr_kernels_generic.obj" "%BUILD_DIR%\qwen_asr_safetensors.obj" "%BUILD_DIR%\qwen_asr_tokenizer.obj" "%BUILD_DIR%\qwen_asr_gpu.obj"
+set SRV_OBJS="%BUILD_DIR%\main.obj" "%BUILD_DIR%\http.obj" "%BUILD_DIR%\multipart.obj" "%BUILD_DIR%\handler_asr.obj" "%BUILD_DIR%\json.obj"
+
+REM Link everything together
+echo Linking...
+link /nologo /DEBUG /SUBSYSTEM:CONSOLE /OUT:"%BIN_DIR%\local-ai-server.exe" %SRV_OBJS% %QWEN_OBJS% !BLAS_LIBS! !CUDA_LIBS! ws2_32.lib advapi32.lib psapi.lib
+
+if %ERRORLEVEL% EQU 0 (
+    echo.
+    echo Build complete: %BIN_DIR%\local-ai-server.exe
+) else (
+    echo.
+    echo Build failed.
+    exit /b 1
+)
