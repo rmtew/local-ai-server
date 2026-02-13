@@ -259,6 +259,37 @@ void http_send_json_error(SOCKET client, int status, const char *message, const 
     http_send_response(client, status, "application/json", buf, jw_length(&w));
 }
 
+void http_send_sse_headers(SOCKET client) {
+    /* Set TCP_NODELAY to flush small writes immediately */
+    int flag = 1;
+    setsockopt(client, IPPROTO_TCP, TCP_NODELAY, (const char *)&flag, sizeof(flag));
+
+    const char *headers =
+        "HTTP/1.1 200 OK\r\n"
+        "Content-Type: text/event-stream\r\n"
+        "Cache-Control: no-cache\r\n"
+        "Connection: keep-alive\r\n"
+        "Access-Control-Allow-Origin: *\r\n"
+        "\r\n";
+    send(client, headers, (int)strlen(headers), 0);
+}
+
+void http_send_sse_event(SOCKET client, const char *data, size_t len) {
+    /* "data: " + payload + "\n\n" */
+    send(client, "data: ", 6, 0);
+    if (len > 0) {
+        size_t sent = 0;
+        while (sent < len) {
+            int chunk = (int)(len - sent);
+            if (chunk > 65536) chunk = 65536;
+            int n = send(client, data + sent, chunk, 0);
+            if (n <= 0) break;
+            sent += (size_t)n;
+        }
+    }
+    send(client, "\n\n", 2, 0);
+}
+
 void http_server_shutdown(HttpServer *srv) {
     srv->running = 0;
 

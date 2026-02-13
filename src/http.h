@@ -46,6 +46,12 @@ void http_send_response(SOCKET client, int status, const char *content_type,
 /* Send a JSON error response matching OpenAI error format. */
 void http_send_json_error(SOCKET client, int status, const char *message, const char *type);
 
+/* Send SSE response headers (200 OK, text/event-stream, TCP_NODELAY). */
+void http_send_sse_headers(SOCKET client);
+
+/* Send a single SSE event: "data: <payload>\n\n". */
+void http_send_sse_event(SOCKET client, const char *data, size_t len);
+
 /* Shut down the server (close listen socket, WSACleanup). */
 void http_server_shutdown(HttpServer *srv);
 

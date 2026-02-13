@@ -44,6 +44,46 @@ static void handle_models(SOCKET client) {
     http_send_response(client, 200, "application/json", buf, jw_length(&w));
 }
 
+/* ---- SSE streaming support ---- */
+
+typedef struct {
+    SOCKET client;
+    qwen_ctx_t *asr_ctx;
+    int error;
+} SseTokenCtx;
+
+/* Token callback: fires during qwen_transcribe_audio for each decoded token.
+ * Reads the most recent timestamp entry (recorded before callback fires). */
+static void sse_token_callback(const char *piece, void *userdata) {
+    SseTokenCtx *sctx = (SseTokenCtx *)userdata;
+    if (sctx->error) return;
+
+    int audio_ms = 0;
+    int byte_offset = 0;
+    if (sctx->asr_ctx->token_ts_len > 0) {
+        int idx = sctx->asr_ctx->token_ts_len - 1;
+        audio_ms = sctx->asr_ctx->token_audio_ms[idx];
+        byte_offset = sctx->asr_ctx->token_byte_offsets[idx];
+    }
+
+    char buf[1024];
+    JsonWriter w;
+    jw_init(&w, buf, sizeof(buf));
+    jw_object_start(&w);
+    jw_field_string(&w, "token", piece);
+    jw_field_int(&w, "audio_ms", audio_ms);
+    jw_field_int(&w, "byte_offset", byte_offset);
+    jw_object_end(&w);
+
+    /* Send SSE event; mark error on failure so we skip further writes */
+    int n = send(sctx->client, "data: ", 6, 0);
+    if (n <= 0) { sctx->error = 1; return; }
+    n = send(sctx->client, buf, (int)jw_length(&w), 0);
+    if (n <= 0) { sctx->error = 1; return; }
+    n = send(sctx->client, "\n\n", 2, 0);
+    if (n <= 0) { sctx->error = 1; return; }
+}
+
 /* ---- Route: POST /v1/audio/transcriptions ---- */
 
 static void handle_transcription(SOCKET client, const HttpRequest *request,
@@ -90,6 +130,7 @@ static void handle_transcription(SOCKET client, const HttpRequest *request,
     /* Optional fields */
     char language[64] = {0};
     char response_format[32] = {0};
+    char prompt[4096] = {0};
 
     const MultipartPart *lang_part = multipart_find(parts, nparts, "language");
     if (lang_part && lang_part->data_len > 0 && lang_part->data_len < sizeof(language)) {
@@ -103,14 +144,22 @@ static void handle_transcription(SOCKET client, const HttpRequest *request,
         response_format[fmt_part->data_len] = '\0';
     }
 
+    const MultipartPart *prompt_part = multipart_find(parts, nparts, "prompt");
+    if (prompt_part && prompt_part->data_len > 0 && prompt_part->data_len < sizeof(prompt)) {
+        memcpy(prompt, prompt_part->data, prompt_part->data_len);
+        prompt[prompt_part->data_len] = '\0';
+    }
+
     int verbose_json = (strcmp(response_format, "verbose_json") == 0);
+    int streaming = (strcmp(response_format, "streaming_verbose_json") == 0);
 
     if (ctx->verbose) {
-        printf("  file: %s (%zu bytes), language: %s, format: %s\n",
+        printf("  file: %s (%zu bytes), language: %s, format: %s, prompt: %s\n",
                file_part->filename[0] ? file_part->filename : "(unnamed)",
                file_part->data_len,
                language[0] ? language : "(auto)",
-               response_format[0] ? response_format : "json");
+               response_format[0] ? response_format : "json",
+               prompt[0] ? prompt : "(none)");
     }
 
     /* Set language if specified (restore after) */
@@ -149,11 +198,123 @@ static void handle_transcription(SOCKET client, const HttpRequest *request,
                (double)n_samples / 16000.0, n_samples);
     }
 
-    /* Transcribe */
+    /* Set prompt bias if specified */
+    if (prompt[0]) {
+        qwen_set_prompt(ctx->asr_ctx, prompt);
+    }
+
+    /* --- Streaming SSE path --- */
+    if (streaming) {
+        http_send_sse_headers(client);
+
+        SseTokenCtx sctx = { client, ctx->asr_ctx, 0 };
+        qwen_set_token_callback(ctx->asr_ctx, sse_token_callback, &sctx);
+
+        char *text = qwen_transcribe_audio(ctx->asr_ctx, samples, n_samples);
+        free(samples);
+
+        qwen_set_token_callback(ctx->asr_ctx, NULL, NULL);
+
+        /* Restore prompt and language */
+        if (prompt[0]) qwen_set_prompt(ctx->asr_ctx, NULL);
+        if (language[0]) {
+            qwen_set_force_language(ctx->asr_ctx, prev_language);
+            free(prev_language);
+        }
+
+        /* Send done event with full verbose_json payload */
+        if (text && !sctx.error) {
+            const qwen_token_ts_t *ts = NULL;
+            int ts_count = 0;
+            qwen_get_token_timestamps(ctx->asr_ctx, &ts, &ts_count);
+
+            size_t buf_size = 4096 + (size_t)ts_count * 256;
+            char *json_buf = (char *)malloc(buf_size);
+            if (json_buf) {
+                JsonWriter w;
+                jw_init(&w, json_buf, buf_size);
+                jw_object_start(&w);
+                jw_field_bool(&w, "done", 1);
+                jw_field_string(&w, "text", text);
+                jw_field_double(&w, "duration",
+                                ctx->asr_ctx->perf_audio_ms / 1000.0, 3);
+                jw_field_int(&w, "perf_total_ms",
+                             (int64_t)ctx->asr_ctx->perf_total_ms);
+                jw_field_int(&w, "perf_encode_ms",
+                             (int64_t)ctx->asr_ctx->perf_encode_ms);
+                jw_field_int(&w, "perf_decode_ms",
+                             (int64_t)ctx->asr_ctx->perf_decode_ms);
+
+                if (ts && ts_count > 0) {
+                    jw_field_array_start(&w, "words");
+                    for (int i = 0; i < ts_count; i++) {
+                        jw_array_sep(&w);
+                        jw_object_start(&w);
+
+                        int start_off = ts[i].byte_offset;
+                        int end_off = (i + 1 < ts_count)
+                            ? ts[i + 1].byte_offset : (int)strlen(text);
+                        int word_len = end_off - start_off;
+
+                        const char *word_start = text + start_off;
+                        while (word_len > 0 && (*word_start == ' '
+                               || *word_start == '\t')) {
+                            word_start++;
+                            word_len--;
+                        }
+                        while (word_len > 0 && (word_start[word_len - 1] == ' '
+                               || word_start[word_len - 1] == '\t')) {
+                            word_len--;
+                        }
+
+                        char word_buf[512];
+                        if (word_len >= (int)sizeof(word_buf))
+                            word_len = (int)sizeof(word_buf) - 1;
+                        if (word_len > 0)
+                            memcpy(word_buf, word_start, (size_t)word_len);
+                        word_buf[word_len > 0 ? word_len : 0] = '\0';
+
+                        jw_field_string(&w, "word", word_buf);
+                        jw_field_double(&w, "start",
+                                        ts[i].audio_ms / 1000.0, 3);
+                        double end_time = (i + 1 < ts_count)
+                            ? ts[i + 1].audio_ms / 1000.0
+                            : ctx->asr_ctx->perf_audio_ms / 1000.0;
+                        jw_field_double(&w, "end", end_time, 3);
+                        jw_field_int(&w, "byte_offset", ts[i].byte_offset);
+                        jw_field_int(&w, "audio_ms", ts[i].audio_ms);
+
+                        jw_object_end(&w);
+                    }
+                    jw_array_end(&w);
+                }
+
+                jw_object_end(&w);
+                http_send_sse_event(client, json_buf, jw_length(&w));
+                free(json_buf);
+            }
+        }
+
+        if (ctx->verbose && text) {
+            printf("  result: %s\n", text);
+            printf("  perf: %.0f ms total, %.0f ms encode, %.0f ms decode\n",
+                   ctx->asr_ctx->perf_total_ms,
+                   ctx->asr_ctx->perf_encode_ms,
+                   ctx->asr_ctx->perf_decode_ms);
+        }
+
+        free(text);
+        return;
+    }
+
+    /* --- Non-streaming path --- */
     char *text = qwen_transcribe_audio(ctx->asr_ctx, samples, n_samples);
     free(samples);
 
-    /* Restore language */
+    /* Restore prompt and language */
+    if (prompt[0]) {
+        qwen_set_prompt(ctx->asr_ctx, NULL);
+    }
     if (language[0]) {
         qwen_set_force_language(ctx->asr_ctx, prev_language);
         free(prev_language);
@@ -195,6 +356,9 @@ static void handle_transcription(SOCKET client, const HttpRequest *request,
         jw_object_start(&w);
         jw_field_string(&w, "text", text);
         jw_field_double(&w, "duration", ctx->asr_ctx->perf_audio_ms / 1000.0, 3);
+        jw_field_int(&w, "perf_total_ms", (int64_t)ctx->asr_ctx->perf_total_ms);
+        jw_field_int(&w, "perf_encode_ms", (int64_t)ctx->asr_ctx->perf_encode_ms);
+        jw_field_int(&w, "perf_decode_ms", (int64_t)ctx->asr_ctx->perf_decode_ms);
 
         if (ts && ts_count > 0) {
             jw_field_array_start(&w, "words");
@@ -234,6 +398,8 @@ static void handle_transcription(SOCKET client, const HttpRequest *request,
                     ? ts[i + 1].audio_ms / 1000.0
                     : ctx->asr_ctx->perf_audio_ms / 1000.0;
                 jw_field_double(&w, "end", end_time, 3);
+                jw_field_int(&w, "byte_offset", ts[i].byte_offset);
+                jw_field_int(&w, "audio_ms", ts[i].audio_ms);
 
                 jw_object_end(&w);
             }
