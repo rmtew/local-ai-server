@@ -59,6 +59,8 @@ static const char *parse_arg(const char *arg, const char *key) {
 }
 
 int main(int argc, char **argv) {
+    SetConsoleOutputCP(CP_UTF8);
+
     const char *model_dir = NULL;
     int port = 8090;
     const char *language = NULL;
