@@ -10,7 +10,7 @@ Qwen3-TTS converts text to speech in three stages:
 2. **Code Predictor** -- predicts sub-codebook tokens for each step
 3. **Vocoder** -- converts codec tokens to 24 kHz audio waveform
 
-The talker and code predictor run natively in C with cuBLAS GPU acceleration. The vocoder runs natively in C with OpenBLAS CPU acceleration. ONNX Runtime is still loaded at startup for the embedding projections used during decode.
+All three stages run natively in C. The talker and code predictor use cuBLAS GPU acceleration. The vocoder uses OpenBLAS CPU acceleration. ONNX Runtime is linked but only used for optional future features (voice cloning).
 
 ## Required Models
 
@@ -24,40 +24,32 @@ models/tts/
     vocab.json
     merges.txt
     tokenizer_config.json
-    tokenizer12hz_decode.onnx    (436 MB) -- ONNX vocoder (fallback)
-    ...other .onnx files...
   Qwen3-TTS-Tokenizer-12Hz/     <-- auto-discovered as sibling
     model.safetensors            (682 MB) -- vocoder weights
 ```
 
-The server looks for the vocoder weights at `<tts-model-dir>/../Qwen3-TTS-Tokenizer-12Hz/model.safetensors`. If found, the native C vocoder is used and the ONNX vocoder session is released (saving ~436 MB of memory). If not found, the ONNX vocoder is used as a fallback.
+The server expects both directories. The vocoder weights are discovered at `<tts-model-dir>/../Qwen3-TTS-Tokenizer-12Hz/model.safetensors`.
 
 ### Downloading Models
 
-**ONNX models and tokenizer** (via included script):
+All models can be downloaded with the included script:
 
 ```bash
 # Requires DEPS_ROOT environment variable
 bash tools/download_tts_models.sh
 ```
 
-This downloads from [`zukky/Qwen3-TTS-ONNX-DLL`](https://huggingface.co/zukky/Qwen3-TTS-ONNX-DLL) on HuggingFace:
-- 9 ONNX model files from the `onnx_kv_06b/` subfolder
-- Tokenizer files (vocab.json, merges.txt, etc.) from `models/Qwen3-TTS-12Hz-0.6B-Base/`
+This downloads everything needed for native inference:
 
-**Native talker + code predictor weights**:
-
-Download `model.safetensors` from [`Qwen/Qwen3-TTS-0.6B`](https://huggingface.co/Qwen/Qwen3-TTS-0.6B) and place it in the same directory as the ONNX models.
-
-**Native vocoder weights**:
-
-Download `model.safetensors` from [`Qwen/Qwen3-TTS-Tokenizer-12Hz`](https://huggingface.co/Qwen/Qwen3-TTS-Tokenizer-12Hz) into a sibling directory named `Qwen3-TTS-Tokenizer-12Hz/`.
+- `model.safetensors` (1.9 GB) from [`Qwen/Qwen3-TTS-0.6B`](https://huggingface.co/Qwen/Qwen3-TTS-0.6B) -- talker + code predictor weights
+- `model.safetensors` (682 MB) from [`Qwen/Qwen3-TTS-Tokenizer-12Hz`](https://huggingface.co/Qwen/Qwen3-TTS-Tokenizer-12Hz) -- vocoder weights
+- Tokenizer files (vocab.json, merges.txt, etc.) from [`zukky/Qwen3-TTS-ONNX-DLL`](https://huggingface.co/zukky/Qwen3-TTS-ONNX-DLL)
 
 ## Pipeline Architecture
 
 ### Stage 1: Text Tokenization and Embedding
 
-Input text is tokenized using the Qwen2 BPE tokenizer (151,643 tokens). Token embeddings are computed via `text_project` (ONNX) and combined with codec prefix tokens (`nothink`, `think_bos`, `think_eos`, `pad`, `bos`).
+Input text is tokenized using the Qwen2 BPE tokenizer (151,643 tokens). Token embeddings are computed via a two-layer text projection (native C) and combined with codec prefix tokens (`nothink`, `think_bos`, `think_eos`, `pad`, `bos`).
 
 ### Stage 2: Talker LM (Native C + cuBLAS)
 
@@ -150,11 +142,11 @@ Note: ONNX Runtime with CUDA ExecutionProvider was tested but was ~2x slower tha
 
 | File | Lines | Purpose |
 |------|-------|---------|
-| `tts_pipeline.c` | ~1000 | Pipeline orchestration, embedding construction, decode loop |
+| `tts_pipeline.c` | ~290 | Pipeline orchestration, WAV encoding |
 | `tts_native.c` | ~1900 | Native talker LM + code predictor (C + cuBLAS) |
 | `tts_vocoder.c` | ~870 | Vocoder pipeline, weight loading, RVQ decode, buffer management |
 | `tts_vocoder_ops.c` | ~230 | Conv1d, ConvTranspose1d, SnakeBeta, LayerNorm, GELU |
 | `tts_vocoder_xfmr.c` | ~240 | 8-layer pre-transformer |
 | `tts_vocoder.h` | ~200 | Vocoder types, constants, weight structs |
-| `tts_ort.c` | ~230 | ONNX Runtime session management |
+| `tts_ort.c` | ~115 | ONNX Runtime initialization (for future voice cloning) |
 | `tts_sampling.c` | ~115 | Top-k sampling, repetition penalty |

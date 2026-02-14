@@ -29,8 +29,8 @@ typedef struct {
 typedef struct {
     TtsOrt ort;
     qwen_tokenizer_t *tokenizer;
-    tts_native_ctx_t *native;   /* Non-NULL when native decode is available */
-    tts_vocoder_ctx_t *vocoder; /* Non-NULL when native vocoder is available */
+    tts_native_ctx_t *native;   /* Native C+cuBLAS talker + code predictor */
+    tts_vocoder_ctx_t *vocoder; /* Native C vocoder */
     int verbose;
 } TtsPipeline;
 

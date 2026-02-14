@@ -66,10 +66,8 @@ Or download manually from [`Qwen/Qwen3-ASR-0.6B`](https://huggingface.co/Qwen/Qw
 Two model directories are required. See [QWEN3-TTS.md](QWEN3-TTS.md) for full details.
 
 ```bash
-# Download ONNX models and tokenizer
+# Download all TTS models (safetensors + embedding ONNX + tokenizer)
 bash tools/download_tts_models.sh
-
-# Download vocoder weights (manual -- see QWEN3-TTS.md)
 ```
 
 ## Usage
@@ -205,8 +203,8 @@ src/
   handler_tts.c/.h      -- TTS request handler, WAV response
   json.c/.h             -- JSON writer
   json_reader.c/.h      -- JSON field extractor (TTS request parsing)
-  tts_pipeline.c/.h     -- TTS orchestration: tokenize, embed, decode, vocoder, WAV
-  tts_ort.c/.h          -- ONNX Runtime session management
+  tts_pipeline.c/.h     -- TTS orchestration: native decode, native vocoder, WAV encoding
+  tts_ort.c/.h          -- ONNX Runtime initialization (for future voice cloning)
   tts_sampling.c        -- Top-k sampling, repetition penalty
   tts_native.c/.h       -- Native C+cuBLAS talker LM + code predictor
   tts_vocoder.c         -- Native C vocoder: RVQ, convolutions, BigVGAN
