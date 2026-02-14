@@ -651,11 +651,12 @@ static void talker_forward(tts_native_ctx_t *ctx, const float *input_embed,
 
     ctx->kv_cache_len = pos + 1;
 
-    /* Save un-normed hidden state for code predictor */
-    memcpy(hidden_out, x, dim * sizeof(float));
-
     /* Final norm + codec_head projection -> logits */
     qwen_rms_norm(x, x, dec->norm, 1, dim, eps);
+
+    /* Save NORMED hidden state for code predictor (matches HF last_hidden_state) */
+    memcpy(hidden_out, x, dim * sizeof(float));
+
     linear_bf16(ctx, ctx->logits_buf, x, ctx->codec_head_bf16, 1, dim, TTS_TALKER_VOCAB);
 }
 
@@ -692,13 +693,13 @@ static void code_predictor_forward(tts_native_ctx_t *ctx,
 
         qwen_rms_norm(ctx->pref_x_norm, x, l->input_norm, seq_len, dim, eps);
 
-        /* QKV (CPU-only for short sequences) */
-        qwen_linear_nobias_bf16(ctx->pref_q, ctx->pref_x_norm, l->wq_weight_bf16,
-                                seq_len, dim, q_dim);
-        qwen_linear_nobias_bf16(ctx->pref_k, ctx->pref_x_norm, l->wk_weight_bf16,
-                                seq_len, dim, kv_dim);
-        qwen_linear_nobias_bf16(ctx->pref_v, ctx->pref_x_norm, l->wv_weight_bf16,
-                                seq_len, dim, kv_dim);
+        /* QKV */
+        linear_bf16(ctx, ctx->pref_q, ctx->pref_x_norm, l->wq_weight_bf16,
+                    seq_len, dim, q_dim);
+        linear_bf16(ctx, ctx->pref_k, ctx->pref_x_norm, l->wk_weight_bf16,
+                    seq_len, dim, kv_dim);
+        linear_bf16(ctx, ctx->pref_v, ctx->pref_x_norm, l->wv_weight_bf16,
+                    seq_len, dim, kv_dim);
 
         qwen_rms_norm_per_head(ctx->pref_q, l->q_norm_weight, seq_len, n_heads, head_dim, eps);
         qwen_rms_norm_per_head(ctx->pref_k, l->k_norm_weight, seq_len, n_kv_heads, head_dim, eps);
@@ -712,17 +713,17 @@ static void code_predictor_forward(tts_native_ctx_t *ctx,
         qwen_causal_attention(ctx->pref_attn_out, ctx->pref_q, ctx->pref_k, ctx->pref_v,
                               seq_len, seq_len, n_heads, n_kv_heads, head_dim, scale, 0);
 
-        qwen_linear_nobias_bf16(ctx->pref_proj_out, ctx->pref_attn_out, l->wo_weight_bf16,
-                                seq_len, q_dim, dim);
+        linear_bf16(ctx, ctx->pref_proj_out, ctx->pref_attn_out, l->wo_weight_bf16,
+                    seq_len, q_dim, dim);
         qwen_add_inplace(x, ctx->pref_proj_out, seq_len * dim);
 
         qwen_rms_norm(ctx->pref_x_norm, x, l->post_attn_norm, seq_len, dim, eps);
 
-        qwen_linear_nobias_bf16(ctx->pref_gate, ctx->pref_x_norm, l->gate_up_fused_bf16,
-                                seq_len, dim, 2 * intermediate);
+        linear_bf16(ctx, ctx->pref_gate, ctx->pref_x_norm, l->gate_up_fused_bf16,
+                    seq_len, dim, 2 * intermediate);
         qwen_swiglu_multiply(ctx->pref_gate, ctx->pref_gate, seq_len, intermediate);
-        qwen_linear_nobias_bf16(ctx->pref_ffn_out, ctx->pref_gate, l->down_weight_bf16,
-                                seq_len, intermediate, dim);
+        linear_bf16(ctx, ctx->pref_ffn_out, ctx->pref_gate, l->down_weight_bf16,
+                    seq_len, intermediate, dim);
         qwen_add_inplace(x, ctx->pref_ffn_out, seq_len * dim);
     }
 
@@ -732,8 +733,8 @@ static void code_predictor_forward(tts_native_ctx_t *ctx,
     qwen_rms_norm(normed, last_hidden, cp->norm, 1, dim, eps);
 
     /* Project through codebook-specific lm_head -> logits */
-    qwen_linear_nobias_bf16(ctx->cp_logits_buf, normed,
-                            cp->lm_head_bf16[codebook_idx], 1, dim, TTS_CODEC_VOCAB);
+    linear_bf16(ctx, ctx->cp_logits_buf, normed,
+                cp->lm_head_bf16[codebook_idx], 1, dim, TTS_CODEC_VOCAB);
 }
 
 /* ========================================================================
@@ -921,19 +922,37 @@ static int64_t *run_decode_loop(tts_native_ctx_t *ctx,
     linear_bf16(ctx, ctx->logits_buf, ctx->dec_x, ctx->codec_head_bf16,
                 1, TTS_HIDDEN_SIZE, TTS_TALKER_VOCAB);
 
-    /* We also need the un-normed hidden state for the code predictor.
-     * Re-extract from prefill output (last position before final norm). */
-    float *last_hidden_unnormed = (float *)malloc(H * sizeof(float));
-    if (!last_hidden_unnormed) { free(all_codes); free(cb0_history); return NULL; }
-    /* The un-normed state is in pref_x at the last position after prefill */
-    memcpy(last_hidden_unnormed, ctx->pref_x + (prefill_seq_len - 1) * H, H * sizeof(float));
+    /* Code predictor needs the NORMED hidden state (same as what lm_head sees).
+     * In HuggingFace, model.last_hidden_state is after final RMSNorm.
+     * dec_x already contains the normed state from talker_prefill. */
+    float *last_hidden_normed = (float *)malloc(H * sizeof(float));
+    if (!last_hidden_normed) { free(all_codes); free(cb0_history); return NULL; }
+    memcpy(last_hidden_normed, ctx->dec_x, H * sizeof(float));
 
     int suppress_start = TTS_TALKER_VOCAB - 1024; /* 2048 */
     int n_steps = 0;
 
+    extern volatile int g_shutdown;
+
     for (int step = 0; step < TTS_MAX_DECODE_STEPS; step++) {
+        if (g_shutdown) {
+            if (ctx->verbose) printf("  TTS native: interrupted by shutdown\n");
+            break;
+        }
+
         /* ---- Sample cb0 from talker logits ---- */
         float *logits = ctx->logits_buf;
+
+        /* Debug: print logit diagnostics for first few steps */
+        if (ctx->verbose && step < 5) {
+            float max_logit = logits[0];
+            int max_idx = 0;
+            for (int i = 1; i < suppress_start; i++) {
+                if (logits[i] > max_logit) { max_logit = logits[i]; max_idx = i; }
+            }
+            printf("  [step %d] max_logit=%.2f (idx=%d), eos_logit=%.2f (idx=%d)\n",
+                   step, max_logit, max_idx, logits[TTS_CODEC_EOS], TTS_CODEC_EOS);
+        }
 
         /* Suppress [2048, 3072) except EOS */
         for (int i = suppress_start; i < TTS_TALKER_VOCAB; i++) {
@@ -964,14 +983,14 @@ static int64_t *run_decode_loop(tts_native_ctx_t *ctx,
         /* Project talker hidden through mtp_projection (or pass through) */
         if (cp->mtp_proj_weight) {
             float projected[TTS_HIDDEN_SIZE];
-            qwen_linear_nobias(projected, last_hidden_unnormed, cp->mtp_proj_weight,
+            qwen_linear_nobias(projected, last_hidden_normed, cp->mtp_proj_weight,
                                1, H, H);
             if (cp->mtp_proj_bias)
                 qwen_add_inplace(projected, cp->mtp_proj_bias, H);
             memcpy(ctx->cp_embed_buf, projected, H * sizeof(float));
         } else {
             /* Same hidden size -- pass through directly */
-            memcpy(ctx->cp_embed_buf, last_hidden_unnormed, H * sizeof(float));
+            memcpy(ctx->cp_embed_buf, last_hidden_normed, H * sizeof(float));
         }
 
         /* cb0 embedding (from talker's codec embedding) */
@@ -1018,15 +1037,15 @@ static int64_t *run_decode_loop(tts_native_ctx_t *ctx,
         if (step + 1 >= TTS_MAX_DECODE_STEPS) break;
 
         /* ---- Talker decode step ---- */
-        talker_forward(ctx, codec_sum, last_hidden_unnormed);
-        /* logits_buf and last_hidden_unnormed are now updated for next iteration */
+        talker_forward(ctx, codec_sum, last_hidden_normed);
+        /* logits_buf and last_hidden_normed are now updated for next iteration */
 
         if (ctx->verbose && (step % 50 == 0 || step < 5)) {
             printf("  TTS native step %d: cb0=%d\n", step, cb0);
         }
     }
 
-    free(last_hidden_unnormed);
+    free(last_hidden_normed);
     free(cb0_history);
 
     *out_n_steps = n_steps;
@@ -1066,6 +1085,25 @@ static int upload_gpu_weights(tts_native_ctx_t *ctx) {
     tts_text_project_t *tp = &ctx->text_project;
     qwen_gpu_upload_weight_bf16(gpu, tp->fc1_weight_bf16, tp->intermediate, TTS_TEXT_HIDDEN_SIZE);
     qwen_gpu_upload_weight_bf16(gpu, tp->fc2_weight_bf16, dim, tp->intermediate);
+
+    /* Code predictor layers (5 layers) */
+    if (ctx->verbose) printf("TTS native: uploading code predictor weights to GPU...\n");
+
+    for (int i = 0; i < TTS_CODEPRED_LAYERS; i++) {
+        qwen_dec_layer_t *l = &ctx->code_pred.layers[i];
+        qwen_gpu_upload_weight_bf16(gpu, l->wq_weight_bf16, q_dim, dim);
+        qwen_gpu_upload_weight_bf16(gpu, l->wk_weight_bf16, kv_dim, dim);
+        qwen_gpu_upload_weight_bf16(gpu, l->wv_weight_bf16, kv_dim, dim);
+        qwen_gpu_upload_weight_bf16(gpu, l->wo_weight_bf16, dim, q_dim);
+        qwen_gpu_upload_weight_bf16(gpu, l->gate_up_fused_bf16, 2 * inter, dim);
+        qwen_gpu_upload_weight_bf16(gpu, l->down_weight_bf16, dim, inter);
+    }
+
+    /* Code predictor lm_heads (15 codebook-specific heads) */
+    for (int j = 0; j < TTS_NUM_CODE_GROUPS - 1; j++) {
+        qwen_gpu_upload_weight_bf16(gpu, ctx->code_pred.lm_head_bf16[j],
+                                    TTS_CODEC_VOCAB, dim);
+    }
 
     if (ctx->verbose) {
         qwen_gpu_print_stats(gpu);
@@ -1137,7 +1175,13 @@ int tts_native_init(tts_native_ctx_t *ctx, const char *model_dir,
 
 #ifdef USE_CUBLAS
     if (ctx->gpu_ctx) {
-        upload_gpu_weights(ctx);
+        const char *cpu_only = getenv("TTS_CPU_ONLY");
+        if (cpu_only && cpu_only[0] == '1') {
+            if (verbose) printf("TTS native: TTS_CPU_ONLY=1, skipping GPU upload\n");
+            ctx->gpu_ctx = NULL;
+        } else {
+            upload_gpu_weights(ctx);
+        }
     }
 #endif
 

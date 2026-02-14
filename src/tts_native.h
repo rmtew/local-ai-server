@@ -34,7 +34,7 @@
 #define TTS_CODEC_VOCAB         2048
 #define TTS_TEXT_VOCAB          151936
 #define TTS_NUM_CODE_GROUPS     16
-#define TTS_MAX_DECODE_STEPS    2048
+#define TTS_MAX_DECODE_STEPS    50
 #define TTS_WAV_SAMPLE_RATE     24000
 #define TTS_ROPE_THETA          1000000.0f
 #define TTS_RMS_NORM_EPS        1e-6f

@@ -87,7 +87,7 @@ void handle_tts_speech(SOCKET client, const HttpRequest *request,
     /* Run synthesis */
     TtsResult result;
     int rc = tts_pipeline_synthesize(ctx->tts, input_text,
-                                      0.9f,    /* temperature */
+                                      0.3f,    /* temperature */
                                       50,      /* top_k */
                                       (float)speed,
                                       &result);

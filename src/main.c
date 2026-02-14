@@ -29,9 +29,13 @@
 /* Global server for Ctrl+C handler */
 static HttpServer g_server;
 
+/* Shutdown flag checked by long-running operations (e.g. TTS decode loop) */
+volatile int g_shutdown = 0;
+
 static BOOL WINAPI ctrl_handler(DWORD type) {
     (void)type;
     printf("\nShutting down...\n");
+    g_shutdown = 1;
     http_server_shutdown(&g_server);
     return TRUE;
 }

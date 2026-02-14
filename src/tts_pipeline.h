@@ -41,7 +41,7 @@ int tts_pipeline_init(TtsPipeline *tts, const char *model_dir, int verbose);
 void tts_pipeline_free(TtsPipeline *tts);
 
 /* Synthesize speech from text.
- * temperature: sampling temperature (0.9 default)
+ * temperature: sampling temperature (0.3 default)
  * top_k: top-k sampling (50 default)
  * speed: playback speed multiplier (1.0 default, not yet implemented)
  *
