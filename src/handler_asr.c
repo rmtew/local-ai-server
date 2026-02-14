@@ -5,6 +5,7 @@
 
 #define _CRT_SECURE_NO_WARNINGS
 #include "handler_asr.h"
+#include "handler_tts.h"
 #include "multipart.h"
 #include "json.h"
 
@@ -25,19 +26,28 @@ static void handle_health(SOCKET client) {
 
 /* ---- Route: GET /v1/models ---- */
 
-static void handle_models(SOCKET client) {
-    char buf[512];
+static void handle_models(SOCKET client, HandlerContext *ctx) {
+    char buf[1024];
     JsonWriter w;
     jw_init(&w, buf, sizeof(buf));
     jw_object_start(&w);
     jw_field_array_start(&w, "data");
-    {
+    if (ctx->asr_ctx) {
         jw_array_sep(&w);
         jw_object_start(&w);
         jw_field_string(&w, "id", "qwen-asr");
         jw_field_string(&w, "object", "model");
         jw_object_end(&w);
     }
+#ifdef USE_ORT
+    if (ctx->tts) {
+        jw_array_sep(&w);
+        jw_object_start(&w);
+        jw_field_string(&w, "id", "qwen3-tts");
+        jw_field_string(&w, "object", "model");
+        jw_object_end(&w);
+    }
+#endif
     jw_array_end(&w);
     jw_object_end(&w);
 
@@ -88,6 +98,14 @@ static void sse_token_callback(const char *piece, void *userdata) {
 
 static void handle_transcription(SOCKET client, const HttpRequest *request,
                                  HandlerContext *ctx) {
+    /* Check ASR is loaded */
+    if (!ctx->asr_ctx) {
+        http_send_json_error(client, 501,
+            "ASR not loaded (start server with --model=<dir>)",
+            "not_implemented");
+        return;
+    }
+
     /* Require multipart/form-data */
     if (strstr(request->content_type, "multipart/form-data") == NULL) {
         http_send_json_error(client, 400,
@@ -451,7 +469,7 @@ void asr_handle_request(SOCKET client, const HttpRequest *request, void *user_da
 
     /* GET /v1/models */
     if (strcmp(request->method, "GET") == 0 && strcmp(request->path, "/v1/models") == 0) {
-        handle_models(client);
+        handle_models(client, ctx);
         return;
     }
 
@@ -459,6 +477,13 @@ void asr_handle_request(SOCKET client, const HttpRequest *request, void *user_da
     if (strcmp(request->method, "POST") == 0 &&
         strcmp(request->path, "/v1/audio/transcriptions") == 0) {
         handle_transcription(client, request, ctx);
+        return;
+    }
+
+    /* POST /v1/audio/speech */
+    if (strcmp(request->method, "POST") == 0 &&
+        strcmp(request->path, "/v1/audio/speech") == 0) {
+        handle_tts_speech(client, request, ctx);
         return;
     }
 

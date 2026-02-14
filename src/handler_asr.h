@@ -9,10 +9,17 @@
 #include "http.h"
 #include "qwen_asr.h"
 
+#ifdef USE_ORT
+#include "tts_pipeline.h"
+#endif
+
 /* Handler context passed as user_data to the HTTP handler callback */
-typedef struct {
-    qwen_ctx_t *asr_ctx;
+typedef struct HandlerContext {
+    qwen_ctx_t *asr_ctx;   /* NULL if ASR not loaded */
     int verbose;
+#ifdef USE_ORT
+    TtsPipeline *tts;      /* NULL if TTS not loaded */
+#endif
 } HandlerContext;
 
 /* HTTP request handler (matches http_handler_fn signature) */

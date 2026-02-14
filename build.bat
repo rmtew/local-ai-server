@@ -94,6 +94,19 @@ if exist "%CUDA_DIR%\lib\x64\cublas.lib" (
     echo CUDA not found -- GPU acceleration disabled
 )
 
+REM Detect ONNX Runtime (optional -- enables TTS via Qwen3-TTS ONNX models)
+set ORT_CFLAGS=
+set ORT_LIBS=
+set "ORT_CPU_DIR=%DEPS_ROOT%\onnxruntime\1.23.2"
+if exist "%ORT_CPU_DIR%\lib\onnxruntime.lib" (
+    echo ONNX Runtime found -- enabling TTS
+    set ORT_CFLAGS=/DUSE_ORT /I"%ORT_CPU_DIR%\include"
+    set ORT_LIBS="%ORT_CPU_DIR%\lib\onnxruntime.lib"
+    set "ORT_DIR=%ORT_CPU_DIR%"
+) else (
+    echo ONNX Runtime not found -- TTS disabled
+)
+
 REM Copy OpenBLAS DLL if not present
 if not exist "%BIN_DIR%\libopenblas.dll" (
     if exist "%OPENBLAS_DIR%\bin\libopenblas.dll" (
@@ -105,11 +118,19 @@ if not exist "%BIN_DIR%\libopenblas.dll" (
     )
 )
 
+REM Copy ONNX Runtime DLL (always update to match linked version)
+if defined ORT_DIR (
+    if exist "%ORT_DIR%\lib\onnxruntime.dll" (
+        echo Copying onnxruntime.dll...
+        copy /Y "%ORT_DIR%\lib\onnxruntime.dll" "%BIN_DIR%" >nul
+    )
+)
+
 REM Qwen-ASR source files (excluding main.c -- server has its own entry point)
 set QWEN_SOURCES="%QWEN_ASR_DIR%\qwen_asr.c" "%QWEN_ASR_DIR%\qwen_asr_audio.c" "%QWEN_ASR_DIR%\qwen_asr_decoder.c" "%QWEN_ASR_DIR%\qwen_asr_encoder.c" "%QWEN_ASR_DIR%\qwen_asr_kernels.c" "%QWEN_ASR_DIR%\qwen_asr_kernels_avx.c" "%QWEN_ASR_DIR%\qwen_asr_kernels_generic.c" "%QWEN_ASR_DIR%\qwen_asr_safetensors.c" "%QWEN_ASR_DIR%\qwen_asr_tokenizer.c" "%QWEN_ASR_DIR%\qwen_asr_gpu.c"
 
 REM Server source files
-set SRV_SOURCES=src\main.c src\http.c src\multipart.c src\handler_asr.c src\json.c
+set SRV_SOURCES=src\main.c src\http.c src\multipart.c src\handler_asr.c src\json.c src\json_reader.c src\handler_tts.c src\tts_ort.c src\tts_pipeline.c src\tts_sampling.c
 
 REM Compile qwen-asr sources with full optimization (inference is CPU-bound)
 echo Compiling qwen-asr (optimized)...
@@ -121,7 +142,7 @@ if %ERRORLEVEL% NEQ 0 (
 
 REM Compile server sources with debug info
 echo Compiling server (debug)...
-cl /nologo /W3 /Od /Zi /DDEBUG !BLAS_CFLAGS! !CUDA_CFLAGS! /I"%QWEN_ASR_DIR%" /Isrc /c %SRV_SOURCES% /Fo:"%BUILD_DIR%\\"
+cl /nologo /W3 /Od /Zi /DDEBUG !BLAS_CFLAGS! !CUDA_CFLAGS! !ORT_CFLAGS! /I"%QWEN_ASR_DIR%" /Isrc /c %SRV_SOURCES% /Fo:"%BUILD_DIR%\\"
 if %ERRORLEVEL% NEQ 0 (
     echo Server compilation failed.
     exit /b 1
@@ -129,11 +150,11 @@ if %ERRORLEVEL% NEQ 0 (
 
 REM Collect all object files
 set QWEN_OBJS="%BUILD_DIR%\qwen_asr.obj" "%BUILD_DIR%\qwen_asr_audio.obj" "%BUILD_DIR%\qwen_asr_decoder.obj" "%BUILD_DIR%\qwen_asr_encoder.obj" "%BUILD_DIR%\qwen_asr_kernels.obj" "%BUILD_DIR%\qwen_asr_kernels_avx.obj" "%BUILD_DIR%\qwen_asr_kernels_generic.obj" "%BUILD_DIR%\qwen_asr_safetensors.obj" "%BUILD_DIR%\qwen_asr_tokenizer.obj" "%BUILD_DIR%\qwen_asr_gpu.obj"
-set SRV_OBJS="%BUILD_DIR%\main.obj" "%BUILD_DIR%\http.obj" "%BUILD_DIR%\multipart.obj" "%BUILD_DIR%\handler_asr.obj" "%BUILD_DIR%\json.obj"
+set SRV_OBJS="%BUILD_DIR%\main.obj" "%BUILD_DIR%\http.obj" "%BUILD_DIR%\multipart.obj" "%BUILD_DIR%\handler_asr.obj" "%BUILD_DIR%\json.obj" "%BUILD_DIR%\json_reader.obj" "%BUILD_DIR%\handler_tts.obj" "%BUILD_DIR%\tts_ort.obj" "%BUILD_DIR%\tts_pipeline.obj" "%BUILD_DIR%\tts_sampling.obj"
 
 REM Link everything together
 echo Linking...
-link /nologo /DEBUG /SUBSYSTEM:CONSOLE /OUT:"%BIN_DIR%\local-ai-server.exe" %SRV_OBJS% %QWEN_OBJS% !BLAS_LIBS! !CUDA_LIBS! ws2_32.lib advapi32.lib psapi.lib
+link /nologo /DEBUG /SUBSYSTEM:CONSOLE /OUT:"%BIN_DIR%\local-ai-server.exe" %SRV_OBJS% %QWEN_OBJS% !BLAS_LIBS! !CUDA_LIBS! !ORT_LIBS! ws2_32.lib advapi32.lib psapi.lib
 
 if %ERRORLEVEL% EQU 0 (
     echo.
