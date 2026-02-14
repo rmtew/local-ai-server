@@ -120,16 +120,18 @@ int tts_ort_init(TtsOrt *ort, const char *model_dir, int verbose) {
 
     printf("Loading TTS models from: %s\n", model_dir);
 
-    /* Load required sessions */
-    if (load_session(ort, model_dir, "text_project.onnx", &ort->text_project, 1) != 0) return -1;
-    if (load_session(ort, model_dir, "codec_embed.onnx", &ort->codec_embed, 1) != 0) return -1;
-    if (load_session(ort, model_dir, "talker_prefill.onnx", &ort->talker_prefill, 1) != 0) return -1;
-    if (load_session(ort, model_dir, "talker_decode.onnx", &ort->talker_decode, 1) != 0) return -1;
-    if (load_session(ort, model_dir, "code_predictor.onnx", &ort->code_predictor, 1) != 0) return -1;
-    if (load_session(ort, model_dir, "code_predictor_embed.onnx", &ort->code_predictor_embed, 1) != 0) return -1;
+    /* Vocoder is required (always ONNX for now) */
     if (load_session(ort, model_dir, "tokenizer12hz_decode.onnx", &ort->tokenizer12hz_decode, 1) != 0) return -1;
 
-    /* Phase 2 sessions (optional) */
+    /* Decode sessions are optional (native C+cuBLAS replaces them) */
+    if (load_session(ort, model_dir, "text_project.onnx", &ort->text_project, 0) != 0) return -1;
+    if (load_session(ort, model_dir, "codec_embed.onnx", &ort->codec_embed, 0) != 0) return -1;
+    if (load_session(ort, model_dir, "talker_prefill.onnx", &ort->talker_prefill, 0) != 0) return -1;
+    if (load_session(ort, model_dir, "talker_decode.onnx", &ort->talker_decode, 0) != 0) return -1;
+    if (load_session(ort, model_dir, "code_predictor.onnx", &ort->code_predictor, 0) != 0) return -1;
+    if (load_session(ort, model_dir, "code_predictor_embed.onnx", &ort->code_predictor_embed, 0) != 0) return -1;
+
+    /* Other optional sessions */
     if (load_session(ort, model_dir, "speaker_encoder.onnx", &ort->speaker_encoder, 0) != 0) return -1;
     if (load_session(ort, model_dir, "tokenizer12hz_encode.onnx", &ort->tokenizer12hz_encode, 0) != 0) return -1;
 
@@ -158,23 +160,31 @@ int tts_ort_init(TtsOrt *ort, const char *model_dir, int verbose) {
         ort->api->AllocatorFree(alloc, _name); \
     } while (0)
 
-    /* text_project: 1 input, 1 output */
-    CACHE_NAME(ort->text_project, 0, 1, text_project_in);
-    CACHE_NAME(ort->text_project, 0, 0, text_project_out);
+    /* text_project: 1 input, 1 output (optional -- native replaces) */
+    if (ort->text_project) {
+        CACHE_NAME(ort->text_project, 0, 1, text_project_in);
+        CACHE_NAME(ort->text_project, 0, 0, text_project_out);
+    }
 
-    /* codec_embed: 1 input, 1 output */
-    CACHE_NAME(ort->codec_embed, 0, 1, codec_embed_in);
-    CACHE_NAME(ort->codec_embed, 0, 0, codec_embed_out);
+    /* codec_embed: 1 input, 1 output (optional -- native replaces) */
+    if (ort->codec_embed) {
+        CACHE_NAME(ort->codec_embed, 0, 1, codec_embed_in);
+        CACHE_NAME(ort->codec_embed, 0, 0, codec_embed_out);
+    }
 
-    /* code_predictor: 2 inputs, 1 output */
-    CACHE_NAME(ort->code_predictor, 0, 1, code_pred_in_embeds);
-    CACHE_NAME(ort->code_predictor, 1, 1, code_pred_in_step);
-    CACHE_NAME(ort->code_predictor, 0, 0, code_pred_out);
+    /* code_predictor: 2 inputs, 1 output (optional -- native replaces) */
+    if (ort->code_predictor) {
+        CACHE_NAME(ort->code_predictor, 0, 1, code_pred_in_embeds);
+        CACHE_NAME(ort->code_predictor, 1, 1, code_pred_in_step);
+        CACHE_NAME(ort->code_predictor, 0, 0, code_pred_out);
+    }
 
-    /* code_predictor_embed: 2 inputs, 1 output */
-    CACHE_NAME(ort->code_predictor_embed, 0, 1, code_pred_embed_in_ids);
-    CACHE_NAME(ort->code_predictor_embed, 1, 1, code_pred_embed_in_step);
-    CACHE_NAME(ort->code_predictor_embed, 0, 0, code_pred_embed_out);
+    /* code_predictor_embed: 2 inputs, 1 output (optional -- native replaces) */
+    if (ort->code_predictor_embed) {
+        CACHE_NAME(ort->code_predictor_embed, 0, 1, code_pred_embed_in_ids);
+        CACHE_NAME(ort->code_predictor_embed, 1, 1, code_pred_embed_in_step);
+        CACHE_NAME(ort->code_predictor_embed, 0, 0, code_pred_embed_out);
+    }
 
     /* tokenizer12hz_decode: 1 input, 1-2 outputs */
     CACHE_NAME(ort->tokenizer12hz_decode, 0, 1, vocoder_in);

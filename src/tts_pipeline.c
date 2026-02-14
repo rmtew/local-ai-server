@@ -24,6 +24,9 @@
 #include <windows.h>
 
 #include "onnxruntime_c_api.h"
+#ifdef USE_CUBLAS
+#include "qwen_asr_gpu.h"
+#endif
 
 /* From tts_sampling.c */
 extern void tts_apply_repetition_penalty(float *logits, int vocab_size,
@@ -116,7 +119,7 @@ int tts_pipeline_init(TtsPipeline *tts, const char *model_dir, int verbose) {
     memset(tts, 0, sizeof(*tts));
     tts->verbose = verbose;
 
-    /* Load ONNX sessions */
+    /* Load ONNX sessions (required for vocoder at minimum) */
     if (tts_ort_init(&tts->ort, model_dir, verbose) != 0) {
         return -1;
     }
@@ -135,10 +138,46 @@ int tts_pipeline_init(TtsPipeline *tts, const char *model_dir, int verbose) {
         printf("TTS tokenizer loaded: %d tokens\n", tts->tokenizer->vocab_size);
     }
 
+    /* Load native C+cuBLAS decode engine (talker + code predictor from safetensors).
+     * Vocoder still uses ONNX. */
+    tts->native = (tts_native_ctx_t *)calloc(1, sizeof(tts_native_ctx_t));
+    if (!tts->native) {
+        fprintf(stderr, "TTS: failed to allocate native context\n");
+        tts_ort_free(&tts->ort);
+        qwen_tokenizer_free(tts->tokenizer);
+        tts->tokenizer = NULL;
+        return -1;
+    }
+    {
+        void *gpu = NULL;
+#ifdef USE_CUBLAS
+        extern qwen_gpu_ctx_t *g_gpu_ctx;
+        /* Initialize GPU context if not already created (e.g. TTS without ASR) */
+        if (!g_gpu_ctx) {
+            g_gpu_ctx = qwen_gpu_init();
+        }
+        gpu = g_gpu_ctx;
+#endif
+        if (tts_native_init(tts->native, model_dir, gpu, verbose) != 0) {
+            fprintf(stderr, "TTS: native init failed (need model.safetensors in %s)\n", model_dir);
+            free(tts->native);
+            tts->native = NULL;
+            tts_ort_free(&tts->ort);
+            qwen_tokenizer_free(tts->tokenizer);
+            tts->tokenizer = NULL;
+            return -1;
+        }
+    }
+
     return 0;
 }
 
 void tts_pipeline_free(TtsPipeline *tts) {
+    if (tts->native) {
+        tts_native_free(tts->native);
+        free(tts->native);
+        tts->native = NULL;
+    }
     if (tts->tokenizer) {
         qwen_tokenizer_free(tts->tokenizer);
         tts->tokenizer = NULL;
@@ -877,44 +916,14 @@ int tts_pipeline_synthesize(TtsPipeline *tts, const char *text,
         printf("TTS synthesize: \"%s\"\n", text);
     }
 
-    /* 1. Build input token sequence */
-    int n_ids = 0, role_len = 0;
-    int64_t *input_ids = build_input_ids(tts, text, &n_ids, &role_len);
-    if (!input_ids) return -1;
-
-    if (tts->verbose) {
-        printf("  tokens: %d total, %d role, %d text, 5 end\n",
-               n_ids, role_len, n_ids - role_len - 5);
-    }
-
-    /* 2. Build prefill embeddings */
-    float *prefill_data = NULL, *trailing_data = NULL, *tts_pad_embed = NULL;
-    int prefill_seq_len = 0, trailing_seq_len = 0;
-
-    int rc = build_prefill_embeddings(tts, input_ids, n_ids, role_len,
-                                       &prefill_data, &prefill_seq_len,
-                                       &trailing_data, &trailing_seq_len,
-                                       &tts_pad_embed);
-    free(input_ids);
-    if (rc != 0) return -1;
-
-    if (tts->verbose) {
-        printf("  prefill seq_len=%d, trailing=%d\n", prefill_seq_len, trailing_seq_len);
-    }
-
-    /* 3. Autoregressive decode loop */
+    /* Native C+cuBLAS decode (talker + code predictor) */
     int n_steps = 0;
-    int64_t *codes = run_decode_loop(tts, prefill_data, prefill_seq_len,
-                                      trailing_data, trailing_seq_len,
-                                      tts_pad_embed, temperature, top_k,
-                                      &n_steps);
-    free(prefill_data);
-    free(trailing_data);
-    free(tts_pad_embed);
-
-    if (!codes || n_steps == 0) {
+    int64_t *codes = NULL;
+    int rc = tts_native_decode(tts->native, text, temperature, top_k,
+                                &codes, &n_steps);
+    if (rc != 0 || !codes || n_steps == 0) {
         free(codes);
-        fprintf(stderr, "TTS: decode produced no steps\n");
+        fprintf(stderr, "TTS: native decode failed\n");
         return -1;
     }
 
