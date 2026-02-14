@@ -103,8 +103,8 @@ int tts_ort_init(TtsOrt *ort, const char *model_dir, int verbose) {
 
     /* Create environment */
     OrtStatus *status;
-    status = ort->api->CreateEnv(verbose ? ORT_LOGGING_LEVEL_INFO : ORT_LOGGING_LEVEL_WARNING,
-                                  "tts", &ort->env);
+    /* Use WARNING level to suppress noisy GetCpuPreferredNodes INFO spam */
+    status = ort->api->CreateEnv(ORT_LOGGING_LEVEL_WARNING, "tts", &ort->env);
     ORT_CHECK(ort->api, status);
 
     /* Create session options */
@@ -112,7 +112,7 @@ int tts_ort_init(TtsOrt *ort, const char *model_dir, int verbose) {
     ORT_CHECK(ort->api, status);
 
     ort->api->SetSessionGraphOptimizationLevel(ort->opts, ORT_ENABLE_ALL);
-    ort->api->SetIntraOpNumThreads(ort->opts, 4);
+    ort->api->SetIntraOpNumThreads(ort->opts, 0); /* 0 = use all cores */
 
     /* Create CPU memory info */
     status = ort->api->CreateCpuMemoryInfo(OrtArenaAllocator, OrtMemTypeDefault, &ort->mem_info);

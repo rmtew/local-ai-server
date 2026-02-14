@@ -924,14 +924,24 @@ int tts_pipeline_synthesize(TtsPipeline *tts, const char *text,
     }
 
     /* 4. Vocoder decode: codes -> audio */
+    LARGE_INTEGER t_voc_start;
+    QueryPerformanceCounter(&t_voc_start);
+    double decode_ms = (double)(t_voc_start.QuadPart - t_start.QuadPart) * 1000.0 / (double)freq.QuadPart;
     if (tts->verbose) {
-        printf("  vocoder: starting (%d steps, %d code groups)...\n",
-               n_steps, NUM_CODE_GROUPS);
+        printf("  vocoder: starting (%d steps, %d code groups)... [decode took %.0f ms]\n",
+               n_steps, NUM_CODE_GROUPS, decode_ms);
         fflush(stdout);
     }
     int n_samples = 0;
     float *audio = run_vocoder(tts, codes, n_steps, &n_samples);
     free(codes);
+
+    if (tts->verbose) {
+        LARGE_INTEGER t_voc_end;
+        QueryPerformanceCounter(&t_voc_end);
+        double voc_ms = (double)(t_voc_end.QuadPart - t_voc_start.QuadPart) * 1000.0 / (double)freq.QuadPart;
+        printf("  vocoder: took %.0f ms\n", voc_ms);
+    }
 
     if (!audio || n_samples == 0) {
         free(audio);
