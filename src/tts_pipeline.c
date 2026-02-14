@@ -74,12 +74,18 @@ static void write_le32(unsigned char *p, uint32_t v) {
 }
 
 /* Encode float audio samples as 16-bit PCM WAV file.
+ * speed adjusts playback rate: >1.0 = faster, <1.0 = slower.
  * Returns malloc'd WAV data, sets *out_len. */
-static unsigned char *encode_wav(const float *samples, int n_samples, size_t *out_len) {
+static unsigned char *encode_wav(const float *samples, int n_samples,
+                                 float speed, size_t *out_len) {
     size_t data_size = (size_t)n_samples * 2;  /* 16-bit = 2 bytes per sample */
     size_t wav_size = 44 + data_size;
     unsigned char *wav = (unsigned char *)malloc(wav_size);
     if (!wav) return NULL;
+
+    /* Adjust effective sample rate for speed control.
+     * Higher rate = player consumes samples faster = speech sounds faster. */
+    uint32_t effective_rate = (uint32_t)(WAV_SAMPLE_RATE * speed + 0.5f);
 
     /* RIFF header */
     memcpy(wav, "RIFF", 4);
@@ -91,8 +97,8 @@ static unsigned char *encode_wav(const float *samples, int n_samples, size_t *ou
     write_le32(wav + 16, 16);                    /* chunk size */
     write_le16(wav + 20, 1);                     /* PCM format */
     write_le16(wav + 22, 1);                     /* mono */
-    write_le32(wav + 24, WAV_SAMPLE_RATE);       /* sample rate */
-    write_le32(wav + 28, WAV_SAMPLE_RATE * 2);   /* byte rate */
+    write_le32(wav + 24, effective_rate);         /* sample rate */
+    write_le32(wav + 28, effective_rate * 2);     /* byte rate */
     write_le16(wav + 32, 2);                     /* block align */
     write_le16(wav + 34, 16);                    /* bits per sample */
 
@@ -884,8 +890,15 @@ static float *run_vocoder(TtsPipeline *tts, const int64_t *codes, int n_steps,
     for (int i = 0; i < ndims; i++) total_elements *= audio_shape[i];
     if (n_samples > (int)total_elements) n_samples = (int)total_elements;
     if (n_samples <= 0) {
-        /* Fallback: use shape-based length */
         n_samples = (ndims >= 2) ? (int)audio_shape[1] : (int)audio_shape[0];
+    }
+
+    if (tts->verbose) {
+        printf("  vocoder output: shape=[");
+        for (int i = 0; i < ndims; i++) printf("%s%lld", i ? "," : "", (long long)audio_shape[i]);
+        printf("], out_lengths=%d, tensor_total=%lld, per_step=%.1f\n",
+               n_samples, (long long)total_elements,
+               n_steps > 0 ? (double)n_samples / n_steps : 0.0);
     }
 
     /* Copy audio data (tensor will be freed) */
@@ -905,8 +918,11 @@ static float *run_vocoder(TtsPipeline *tts, const int64_t *codes, int n_steps,
 int tts_pipeline_synthesize(TtsPipeline *tts, const char *text,
                             float temperature, int top_k, float speed,
                             TtsResult *result) {
-    (void)speed;  /* not implemented yet */
     memset(result, 0, sizeof(*result));
+
+    /* Clamp speed to reasonable range */
+    if (speed < 0.25f) speed = 0.25f;
+    if (speed > 4.0f) speed = 4.0f;
 
     LARGE_INTEGER freq, t_start, t_end;
     QueryPerformanceFrequency(&freq);
@@ -965,7 +981,7 @@ int tts_pipeline_synthesize(TtsPipeline *tts, const char *text,
 
     /* 5. Encode as WAV */
     size_t wav_len = 0;
-    unsigned char *wav = encode_wav(audio, n_samples, &wav_len);
+    unsigned char *wav = encode_wav(audio, n_samples, speed, &wav_len);
     free(audio);
 
     if (!wav) {

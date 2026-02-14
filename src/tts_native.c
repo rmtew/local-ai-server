@@ -818,37 +818,76 @@ static int build_prefill_embeddings(tts_native_ctx_t *ctx,
     if (!role_embed) { free(tts_special_embed); free(*tts_pad_embed_out); return -1; }
     text_embed_and_project(ctx, input_ids, role_len, role_embed);
 
-    /* 3. Codec prefix embeddings */
-    int64_t codec_prefix[] = { TTS_CODEC_NOTHINK, TTS_CODEC_THINK_BOS,
-                                TTS_CODEC_THINK_EOS, TTS_CODEC_PAD, TTS_CODEC_BOS };
-    float codec_embed[5 * TTS_HIDDEN_SIZE];
-    for (int i = 0; i < 5; i++)
+    /* 3. Codec prefix embeddings.
+     * Python reference (no language):
+     *   codec = [nothink, think_bos, think_eos, pad, bos]  (5 tokens)
+     * With language:
+     *   codec = [think, think_bos, language_id, think_eos, pad, bos]  (6 tokens)
+     *
+     * Interleaving formula:
+     *   text_side = [tts_pad * (n_codec-2), tts_bos] + codec[:-1]  (element-wise add)
+     *   last_pos  = text_project(first_text) + codec[-1]  (= bos)
+     */
+    int64_t codec_prefix[6];
+    int n_codec;
+
+    /* TODO: add language parameter to API */
+    int language_id = 2055;  /* Chinese (hardcoded for now) */
+
+    if (language_id >= 0) {
+        codec_prefix[0] = 2154;  /* codec_think_id */
+        codec_prefix[1] = TTS_CODEC_THINK_BOS;
+        codec_prefix[2] = (int64_t)language_id;
+        codec_prefix[3] = TTS_CODEC_THINK_EOS;
+        codec_prefix[4] = TTS_CODEC_PAD;
+        codec_prefix[5] = TTS_CODEC_BOS;
+        n_codec = 6;
+    } else {
+        codec_prefix[0] = TTS_CODEC_NOTHINK;
+        codec_prefix[1] = TTS_CODEC_THINK_BOS;
+        codec_prefix[2] = TTS_CODEC_THINK_EOS;
+        codec_prefix[3] = TTS_CODEC_PAD;
+        codec_prefix[4] = TTS_CODEC_BOS;
+        n_codec = 5;
+    }
+
+    float *codec_embed = (float *)malloc((size_t)n_codec * H * sizeof(float));
+    if (!codec_embed) { free(tts_special_embed); free(role_embed); free(*tts_pad_embed_out); return -1; }
+    for (int i = 0; i < n_codec; i++)
         codec_embed_lookup(ctx, (int)codec_prefix[i], codec_embed + i * H);
 
     /* 4. First text token embedding via text_project */
     float text_first_embed[TTS_HIDDEN_SIZE];
     text_embed_and_project(ctx, &input_ids[role_len], 1, text_first_embed);
 
-    /* 5. Assemble prefill: [role(role_len), pad+codec(4), text_first+codec(1)] */
-    int pf_len = role_len + 5;
+    /* 5. Assemble prefill:
+     *   [role(role_len), pad*N+bos + codec[:-1], text_first + codec[-1]]
+     *   N = n_codec - 2, so combined part = (n_codec-1) positions
+     *   Total = role_len + (n_codec-1) + 1 = role_len + n_codec */
+    int n_combined = n_codec - 1;  /* text_side + codec[:-1] */
+    int pf_len = role_len + n_combined + 1;
     float *pf = (float *)calloc((size_t)pf_len * H, sizeof(float));
-    if (!pf) { free(tts_special_embed); free(role_embed); free(*tts_pad_embed_out); return -1; }
+    if (!pf) { free(tts_special_embed); free(role_embed); free(*tts_pad_embed_out); free(codec_embed); return -1; }
 
     memcpy(pf, role_embed, (size_t)role_len * H * sizeof(float));
 
-    /* Sum: tts_pad + codec[0..2], tts_bos + codec[3] */
+    /* Combined: [pad * (n_codec-2), bos] + codec[:-1] */
     int off = role_len * H;
-    for (int i = 0; i < 3; i++) {
+    int n_pad = n_codec - 2;
+    for (int i = 0; i < n_pad; i++) {
         for (int j = 0; j < H; j++)
             pf[off + i * H + j] = tts_pad_embed[j] + codec_embed[i * H + j];
     }
+    /* bos + codec[n_pad] */
     for (int j = 0; j < H; j++)
-        pf[off + 3 * H + j] = tts_bos_embed[j] + codec_embed[3 * H + j];
+        pf[off + n_pad * H + j] = tts_bos_embed[j] + codec_embed[n_pad * H + j];
 
-    /* Sum: text_first + codec[4] */
-    off = (role_len + 4) * H;
+    /* First text + codec[-1] (last codec token) */
+    off = (role_len + n_combined) * H;
     for (int j = 0; j < H; j++)
-        pf[off + j] = text_first_embed[j] + codec_embed[4 * H + j];
+        pf[off + j] = text_first_embed[j] + codec_embed[(n_codec - 1) * H + j];
+
+    free(codec_embed);
 
     *prefill_out = pf;
     *prefill_len_out = pf_len;
