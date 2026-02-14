@@ -12,6 +12,7 @@
 
 #include "tts_ort.h"
 #include "tts_native.h"
+#include "tts_vocoder.h"
 #include "qwen_asr_tokenizer.h"
 #include <stddef.h>
 
@@ -28,7 +29,8 @@ typedef struct {
 typedef struct {
     TtsOrt ort;
     qwen_tokenizer_t *tokenizer;
-    tts_native_ctx_t *native;  /* Non-NULL when native decode is available */
+    tts_native_ctx_t *native;   /* Non-NULL when native decode is available */
+    tts_vocoder_ctx_t *vocoder; /* Non-NULL when native vocoder is available */
     int verbose;
 } TtsPipeline;
 

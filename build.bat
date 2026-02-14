@@ -130,7 +130,7 @@ REM Qwen-ASR source files (excluding main.c -- server has its own entry point)
 set QWEN_SOURCES="%QWEN_ASR_DIR%\qwen_asr.c" "%QWEN_ASR_DIR%\qwen_asr_audio.c" "%QWEN_ASR_DIR%\qwen_asr_decoder.c" "%QWEN_ASR_DIR%\qwen_asr_encoder.c" "%QWEN_ASR_DIR%\qwen_asr_kernels.c" "%QWEN_ASR_DIR%\qwen_asr_kernels_avx.c" "%QWEN_ASR_DIR%\qwen_asr_kernels_generic.c" "%QWEN_ASR_DIR%\qwen_asr_safetensors.c" "%QWEN_ASR_DIR%\qwen_asr_tokenizer.c" "%QWEN_ASR_DIR%\qwen_asr_gpu.c"
 
 REM Server source files
-set SRV_SOURCES=src\main.c src\http.c src\multipart.c src\handler_asr.c src\json.c src\json_reader.c src\handler_tts.c src\tts_ort.c src\tts_pipeline.c src\tts_sampling.c src\tts_native.c
+set SRV_SOURCES=src\main.c src\http.c src\multipart.c src\handler_asr.c src\json.c src\json_reader.c src\handler_tts.c src\tts_ort.c src\tts_pipeline.c src\tts_sampling.c src\tts_native.c src\tts_vocoder.c src\tts_vocoder_ops.c src\tts_vocoder_xfmr.c
 
 REM Compile qwen-asr sources with full optimization (inference is CPU-bound)
 echo Compiling qwen-asr (optimized)...
@@ -150,7 +150,7 @@ if %ERRORLEVEL% NEQ 0 (
 
 REM Collect all object files
 set QWEN_OBJS="%BUILD_DIR%\qwen_asr.obj" "%BUILD_DIR%\qwen_asr_audio.obj" "%BUILD_DIR%\qwen_asr_decoder.obj" "%BUILD_DIR%\qwen_asr_encoder.obj" "%BUILD_DIR%\qwen_asr_kernels.obj" "%BUILD_DIR%\qwen_asr_kernels_avx.obj" "%BUILD_DIR%\qwen_asr_kernels_generic.obj" "%BUILD_DIR%\qwen_asr_safetensors.obj" "%BUILD_DIR%\qwen_asr_tokenizer.obj" "%BUILD_DIR%\qwen_asr_gpu.obj"
-set SRV_OBJS="%BUILD_DIR%\main.obj" "%BUILD_DIR%\http.obj" "%BUILD_DIR%\multipart.obj" "%BUILD_DIR%\handler_asr.obj" "%BUILD_DIR%\json.obj" "%BUILD_DIR%\json_reader.obj" "%BUILD_DIR%\handler_tts.obj" "%BUILD_DIR%\tts_ort.obj" "%BUILD_DIR%\tts_pipeline.obj" "%BUILD_DIR%\tts_sampling.obj" "%BUILD_DIR%\tts_native.obj"
+set SRV_OBJS="%BUILD_DIR%\main.obj" "%BUILD_DIR%\http.obj" "%BUILD_DIR%\multipart.obj" "%BUILD_DIR%\handler_asr.obj" "%BUILD_DIR%\json.obj" "%BUILD_DIR%\json_reader.obj" "%BUILD_DIR%\handler_tts.obj" "%BUILD_DIR%\tts_ort.obj" "%BUILD_DIR%\tts_pipeline.obj" "%BUILD_DIR%\tts_sampling.obj" "%BUILD_DIR%\tts_native.obj" "%BUILD_DIR%\tts_vocoder.obj" "%BUILD_DIR%\tts_vocoder_ops.obj" "%BUILD_DIR%\tts_vocoder_xfmr.obj"
 
 REM Link everything together
 echo Linking...

@@ -120,7 +120,7 @@ int tts_ort_init(TtsOrt *ort, const char *model_dir, int verbose) {
 
     printf("Loading TTS models from: %s\n", model_dir);
 
-    /* Vocoder is required (always ONNX for now) */
+    /* Vocoder ONNX (released later if native vocoder loads successfully) */
     if (load_session(ort, model_dir, "tokenizer12hz_decode.onnx", &ort->tokenizer12hz_decode, 1) != 0) return -1;
 
     /* Decode sessions are optional (native C+cuBLAS replaces them) */

@@ -6,3 +6,6 @@ bin/
 *.ilk
 *.exp
 *.lib
+*.raw
+*.wav
+*.pcm

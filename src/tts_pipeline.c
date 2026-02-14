@@ -144,8 +144,7 @@ int tts_pipeline_init(TtsPipeline *tts, const char *model_dir, int verbose) {
         printf("TTS tokenizer loaded: %d tokens\n", tts->tokenizer->vocab_size);
     }
 
-    /* Load native C+cuBLAS decode engine (talker + code predictor from safetensors).
-     * Vocoder still uses ONNX. */
+    /* Load native C+cuBLAS decode engine (talker + code predictor from safetensors). */
     tts->native = (tts_native_ctx_t *)calloc(1, sizeof(tts_native_ctx_t));
     if (!tts->native) {
         fprintf(stderr, "TTS: failed to allocate native context\n");
@@ -175,10 +174,52 @@ int tts_pipeline_init(TtsPipeline *tts, const char *model_dir, int verbose) {
         }
     }
 
+    /* Try to load native vocoder from sibling Qwen3-TTS-Tokenizer-12Hz directory.
+     * If found, replaces the ONNX vocoder for much faster inference. */
+    {
+        char voc_dir[512];
+        snprintf(voc_dir, sizeof(voc_dir), "%s/../Qwen3-TTS-Tokenizer-12Hz", model_dir);
+
+        /* Check if model.safetensors exists there */
+        char voc_check[600];
+        snprintf(voc_check, sizeof(voc_check), "%s/model.safetensors", voc_dir);
+        FILE *f = fopen(voc_check, "rb");
+        if (f) {
+            fclose(f);
+            tts->vocoder = (tts_vocoder_ctx_t *)calloc(1, sizeof(tts_vocoder_ctx_t));
+            if (tts->vocoder) {
+                if (tts_vocoder_init(tts->vocoder, voc_dir, verbose) != 0) {
+                    fprintf(stderr, "TTS: native vocoder init failed, falling back to ONNX\n");
+                    free(tts->vocoder);
+                    tts->vocoder = NULL;
+                } else {
+                    if (verbose) {
+                        printf("TTS: native vocoder loaded from %s\n", voc_dir);
+                    }
+                    /* Release ONNX vocoder session -- native replaces it */
+                    if (tts->ort.tokenizer12hz_decode) {
+                        tts->ort.api->ReleaseSession(tts->ort.tokenizer12hz_decode);
+                        tts->ort.tokenizer12hz_decode = NULL;
+                        free(tts->ort.vocoder_in); tts->ort.vocoder_in = NULL;
+                        free(tts->ort.vocoder_out_audio); tts->ort.vocoder_out_audio = NULL;
+                        free(tts->ort.vocoder_out_lengths); tts->ort.vocoder_out_lengths = NULL;
+                    }
+                }
+            }
+        } else if (verbose) {
+            printf("TTS: native vocoder not found at %s, using ONNX\n", voc_dir);
+        }
+    }
+
     return 0;
 }
 
 void tts_pipeline_free(TtsPipeline *tts) {
+    if (tts->vocoder) {
+        tts_vocoder_free(tts->vocoder);
+        free(tts->vocoder);
+        tts->vocoder = NULL;
+    }
     if (tts->native) {
         tts_native_free(tts->native);
         free(tts->native);
@@ -958,7 +999,12 @@ int tts_pipeline_synthesize(TtsPipeline *tts, const char *text,
         fflush(stdout);
     }
     int n_samples = 0;
-    float *audio = run_vocoder(tts, codes, n_steps, &n_samples);
+    float *audio = NULL;
+    if (tts->vocoder) {
+        audio = tts_vocoder_run(tts->vocoder, codes, n_steps, &n_samples);
+    } else {
+        audio = run_vocoder(tts, codes, n_steps, &n_samples);
+    }
     free(codes);
 
     if (tts->verbose) {
