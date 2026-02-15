@@ -1,8 +1,7 @@
 /*
  * tts_vocoder.h - Native C vocoder for Qwen3-TTS Tokenizer-12Hz
  *
- * Replaces the ONNX Runtime vocoder (tokenizer12hz_decode.onnx) with a native
- * C implementation using im2col+SGEMM (OpenBLAS) for Conv1d operations.
+ * Native C vocoder using im2col+SGEMM (OpenBLAS) for Conv1d operations.
  *
  * Architecture: RVQ decode -> CausalConv1d -> 8-layer transformer ->
  *               ConvNeXt upsample (4x) -> BigVGAN decoder (480x) -> audio

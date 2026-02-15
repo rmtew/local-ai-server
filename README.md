@@ -22,7 +22,6 @@ See [QWEN3-TTS.md](QWEN3-TTS.md) for TTS-specific architecture and model details
 - **DEPS_ROOT** environment variable pointing to shared dependencies directory
 - **OpenBLAS** at `%DEPS_ROOT%/openblas/` (strongly recommended for CPU performance)
 - **CUDA 12.x** (optional, enables cuBLAS GPU acceleration)
-- **ONNX Runtime** at `%DEPS_ROOT%/onnxruntime/1.23.2/` (required for TTS)
 
 ## Building
 
@@ -34,7 +33,7 @@ cd local-ai-server
 # Or if already cloned:
 git submodule update --init
 
-# Build (auto-detects MSVC, OpenBLAS, CUDA, ONNX Runtime)
+# Build (auto-detects MSVC, OpenBLAS, CUDA)
 build.bat
 ```
 
@@ -43,7 +42,6 @@ Output: `bin/local-ai-server.exe` (plus any required DLLs copied to `bin/`)
 The build script auto-detects available libraries and sets compile flags accordingly:
 - `USE_BLAS` -- OpenBLAS found
 - `USE_CUBLAS`, `USE_CUDA_KERNELS` -- CUDA toolkit + nvcc found
-- `USE_ORT` -- ONNX Runtime found (required for TTS)
 
 ## Model Setup
 
@@ -66,7 +64,7 @@ Or download manually from [`Qwen/Qwen3-ASR-0.6B`](https://huggingface.co/Qwen/Qw
 Two model directories are required. See [QWEN3-TTS.md](QWEN3-TTS.md) for full details.
 
 ```bash
-# Download all TTS models (safetensors + embedding ONNX + tokenizer)
+# Download all TTS models (safetensors + tokenizer)
 bash tools/download_tts_models.sh
 ```
 
@@ -208,7 +206,6 @@ src/
   json.c/.h             -- JSON writer
   json_reader.c/.h      -- JSON field extractor (TTS request parsing)
   tts_pipeline.c/.h     -- TTS orchestration: native decode, native vocoder, WAV encoding
-  tts_ort.c/.h          -- ONNX Runtime initialization (for future voice cloning)
   tts_sampling.c        -- Top-k sampling, repetition penalty
   tts_native.c/.h       -- Native C+cuBLAS talker LM + code predictor
   tts_vocoder.c         -- Native C vocoder: RVQ, convolutions, BigVGAN

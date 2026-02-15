@@ -16,13 +16,6 @@
 
 void handle_tts_speech(SOCKET client, const HttpRequest *request,
                        struct HandlerContext *ctx) {
-#ifndef USE_ORT
-    (void)request;
-    (void)ctx;
-    http_send_json_error(client, 501,
-        "TTS not available (server built without ONNX Runtime support)",
-        "not_implemented");
-#else
     if (!ctx->tts) {
         http_send_json_error(client, 501,
             "TTS not loaded (start server with --tts-model=<dir>)",
@@ -142,5 +135,4 @@ void handle_tts_speech(SOCKET client, const HttpRequest *request,
     http_send_response(client, 200, "audio/wav",
                        (const char *)result.wav_data, result.wav_len);
     free(result.wav_data);
-#endif /* USE_ORT */
 }

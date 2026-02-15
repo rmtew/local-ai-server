@@ -28,10 +28,7 @@
 
 #include "tts_vocoder.h"
 #include "qwen_asr_kernels.h"
-
-#ifdef USE_ORT
 #include "tts_pipeline.h"
-#endif
 
 /* Required by tts_native.c */
 volatile int g_shutdown = 0;
@@ -209,7 +206,6 @@ static double median_of(double *vals, int n) {
  * Generate mode: run full TTS pipeline to produce reference codes + audio
  * ======================================================================== */
 
-#ifdef USE_ORT
 static int do_generate(const char *model_dir, const char *out_codes_path,
                         const char *out_raw_path) {
     printf("=== Generate mode ===\n");
@@ -279,7 +275,6 @@ static int do_generate(const char *model_dir, const char *out_codes_path,
     printf("Generate complete.\n");
     return 0;
 }
-#endif /* USE_ORT */
 
 /* ========================================================================
  * Benchmark mode: vocoder-only timing and comparison
@@ -515,12 +510,7 @@ int main(int argc, char **argv) {
     }
 
     if (generate) {
-#ifdef USE_ORT
         return do_generate(model_dir, out_codes_path, out_path);
-#else
-        fprintf(stderr, "Error: --generate requires ORT support (build with USE_ORT)\n");
-        return 1;
-#endif
     }
 
     if (!codes_path) {

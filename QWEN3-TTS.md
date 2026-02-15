@@ -10,7 +10,7 @@ Qwen3-TTS converts text to speech in three stages:
 2. **Code Predictor** -- predicts sub-codebook tokens for each step
 3. **Vocoder** -- converts codec tokens to 24 kHz audio waveform
 
-All three stages run natively in C. The talker and code predictor use cuBLAS GPU acceleration. The vocoder uses OpenBLAS CPU acceleration. ONNX Runtime is linked but only used for optional future features (voice cloning).
+All three stages run natively in C. The talker and code predictor use cuBLAS GPU acceleration. The vocoder uses OpenBLAS CPU acceleration.
 
 ## Required Models
 
@@ -118,11 +118,11 @@ Benchmarks on an RTX 3080 + i7-10700K system. Times vary with input length.
 
 ### Short sentence (~1 second of audio, ~11 codec steps)
 
-| Configuration | Decode | Vocoder | Total |
-|---------------|--------|---------|-------|
-| Full ONNX (CPU) | ~1.6s | ~36.7s | ~38.3s |
-| Native decode + ONNX vocoder | ~1.6s | ~36.7s | ~38.3s |
-| Native decode + native vocoder | ~1.6s | ~10.1s | ~11.7s |
+| Stage | Time |
+|-------|------|
+| Talker decode (GPU) | ~1.6s |
+| Native vocoder (CPU) | ~10.1s |
+| **Total** | ~11.7s |
 
 ### Medium sentence (~2 seconds of audio, ~24 codec steps)
 
@@ -132,11 +132,7 @@ Benchmarks on an RTX 3080 + i7-10700K system. Times vary with input length.
 | Native vocoder (CPU) | ~25s |
 | **Total** | ~29s |
 
-The native C vocoder is **3.6x faster** than ONNX Runtime for the vocoder stage. It matches ONNX output exactly (correlation 1.0, SNR > 110 dB).
-
-The vocoder remains the bottleneck -- BigVGAN Conv1d operations account for ~96% of vocoder time. Further optimization with AVX2/SSE vectorization and BLAS-accelerated convolutions is planned.
-
-Note: ONNX Runtime with CUDA ExecutionProvider was tested but was ~2x slower than CPU due to excessive host-device memory copies in the vocoder's many small convolutions.
+The vocoder is the bottleneck -- BigVGAN Conv1d operations account for ~96% of vocoder time. Further optimization with AVX2/SSE vectorization and BLAS-accelerated convolutions is planned.
 
 ## Source Files
 
@@ -148,7 +144,6 @@ Note: ONNX Runtime with CUDA ExecutionProvider was tested but was ~2x slower tha
 | `tts_vocoder_ops.c` | ~230 | Conv1d, ConvTranspose1d, SnakeBeta, LayerNorm, GELU |
 | `tts_vocoder_xfmr.c` | ~240 | 8-layer pre-transformer |
 | `tts_vocoder.h` | ~200 | Vocoder types, constants, weight structs |
-| `tts_ort.c` | ~115 | ONNX Runtime initialization (for future voice cloning) |
 | `tts_sampling.c` | ~115 | Top-k sampling, repetition penalty |
 
 ## Voice Cloning

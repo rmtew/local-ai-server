@@ -42,7 +42,6 @@ static void handle_models(SOCKET client, HandlerContext *ctx) {
         jw_field_string(&w, "object", "model");
         jw_object_end(&w);
     }
-#ifdef USE_ORT
     if (ctx->tts) {
         jw_array_sep(&w);
         jw_object_start(&w);
@@ -50,7 +49,6 @@ static void handle_models(SOCKET client, HandlerContext *ctx) {
         jw_field_string(&w, "object", "model");
         jw_object_end(&w);
     }
-#endif
     jw_array_end(&w);
     jw_object_end(&w);
 

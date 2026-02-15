@@ -2,7 +2,7 @@
  * tts_native.h - Native C+cuBLAS TTS inference for Qwen3-TTS
  *
  * Reuses qwen-asr infrastructure (safetensors, tokenizer, kernels, GPU)
- * for the talker LM and code predictor. Vocoder remains in ONNX for now.
+ * for the talker LM and code predictor. Vocoder is in tts_vocoder.c.
  *
  * Architecture:
  *   Talker LM: 28-layer Qwen3 transformer (identical to qwen-asr decoder)

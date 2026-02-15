@@ -25,10 +25,7 @@
 #include "handler_asr.h"
 #include "qwen_asr.h"
 #include "qwen_asr_kernels.h"
-
-#ifdef USE_ORT
 #include "tts_pipeline.h"
-#endif
 
 /* Global server for Ctrl+C handler */
 static HttpServer g_server;
@@ -59,7 +56,7 @@ static void print_usage(const char *prog) {
     printf("At least one of --model or --tts-model must be specified.\n\n");
     printf("Options:\n");
     printf("  --model=<dir>      Path to qwen-asr model directory (ASR)\n");
-    printf("  --tts-model=<dir>  Path to qwen3-tts ONNX model directory (TTS)\n");
+    printf("  --tts-model=<dir>  Path to qwen3-tts model directory (TTS)\n");
     printf("  --port=<N>         Listen port (default: 8090)\n");
     printf("  --language=<lang>  Force ASR language (default: auto-detect)\n");
     printf("  --threads=<N>      CPU threads for inference (default: 4)\n");
@@ -156,7 +153,6 @@ int main(int argc, char **argv) {
     }
 
     /* Load TTS model (optional) */
-#ifdef USE_ORT
     TtsPipeline *tts_pipeline = NULL;
     if (tts_model_dir) {
         tts_pipeline = (TtsPipeline *)calloc(1, sizeof(TtsPipeline));
@@ -172,19 +168,12 @@ int main(int argc, char **argv) {
             return 1;
         }
     }
-#else
-    if (tts_model_dir) {
-        fprintf(stderr, "Warning: --tts-model ignored (built without ONNX Runtime support)\n");
-    }
-#endif
 
     /* Initialize HTTP server */
     memset(&g_server, 0, sizeof(g_server));
     if (http_server_init(&g_server, port) != 0) {
         if (asr_ctx) qwen_free(asr_ctx);
-#ifdef USE_ORT
         if (tts_pipeline) { tts_pipeline_free(tts_pipeline); free(tts_pipeline); }
-#endif
         return 1;
     }
 
@@ -224,20 +213,16 @@ int main(int argc, char **argv) {
     handler_ctx.asr_ctx = asr_ctx;
     handler_ctx.verbose = verbose;
     handler_ctx.threads = threads;
-#ifdef USE_ORT
     handler_ctx.tts = tts_pipeline;
-#endif
 
     http_server_run(&g_server, asr_handle_request, &handler_ctx);
 
     /* Cleanup */
     printf("Cleaning up...\n");
     if (asr_ctx) qwen_free(asr_ctx);
-#ifdef USE_ORT
     if (tts_pipeline) {
         tts_pipeline_free(tts_pipeline);
         free(tts_pipeline);
     }
-#endif
     return 0;
 }

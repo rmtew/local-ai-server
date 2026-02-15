@@ -8,9 +8,6 @@
 #ifndef LOCAL_AI_TTS_PIPELINE_H
 #define LOCAL_AI_TTS_PIPELINE_H
 
-#ifdef USE_ORT
-
-#include "tts_ort.h"
 #include "tts_native.h"
 #include "tts_vocoder.h"
 #include "tts_voice_presets.h"
@@ -28,7 +25,6 @@ typedef struct {
 
 /* TTS pipeline state */
 typedef struct {
-    TtsOrt ort;
     qwen_tokenizer_t *tokenizer;
     tts_native_ctx_t *native;   /* Native C+cuBLAS talker + code predictor */
     tts_vocoder_ctx_t *vocoder; /* Native C vocoder */
@@ -36,7 +32,7 @@ typedef struct {
     int verbose;
 } TtsPipeline;
 
-/* Initialize the TTS pipeline. model_dir should contain both ONNX models
+/* Initialize the TTS pipeline. model_dir should contain safetensors weights
  * and tokenizer files (vocab.json, merges.txt).
  * Returns 0 on success. */
 int tts_pipeline_init(TtsPipeline *tts, const char *model_dir, int verbose);
@@ -58,5 +54,4 @@ int tts_pipeline_synthesize(TtsPipeline *tts, const char *text,
                             float temperature, int top_k, float speed,
                             TtsResult *result);
 
-#endif /* USE_ORT */
 #endif /* LOCAL_AI_TTS_PIPELINE_H */

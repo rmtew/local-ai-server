@@ -52,7 +52,6 @@ SRV_SRCS = \
 	$(SRC_DIR)/handler_tts.c \
 	$(SRC_DIR)/json.c \
 	$(SRC_DIR)/json_reader.c \
-	$(SRC_DIR)/tts_ort.c \
 	$(SRC_DIR)/tts_pipeline.c \
 	$(SRC_DIR)/tts_sampling.c \
 	$(SRC_DIR)/tts_native.c \
@@ -145,4 +144,3 @@ else
 	@echo "BLAS:     OpenBLAS"
 endif
 	@echo "CUDA:     disabled (Linux build)"
-	@echo "ORT:      disabled (Linux build)"

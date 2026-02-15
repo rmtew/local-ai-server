@@ -3,16 +3,13 @@
  *
  * Implements the full TTS pipeline:
  *   1. BPE tokenize input text
- *   2. Build embeddings (text_project + codec_embed via ONNX)
- *   3. Native C+cuBLAS talker decode + code predictor
- *   4. Native C vocoder -> audio
- *   5. WAV encoding
+ *   2. Native C+cuBLAS talker decode + code predictor
+ *   3. Native C vocoder -> audio
+ *   4. WAV encoding
  */
 
 #define _CRT_SECURE_NO_WARNINGS
 #include "tts_pipeline.h"
-
-#ifdef USE_ORT
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -94,18 +91,12 @@ int tts_pipeline_init(TtsPipeline *tts, const char *model_dir, int verbose) {
     memset(tts, 0, sizeof(*tts));
     tts->verbose = verbose;
 
-    /* Load ONNX sessions (required for vocoder at minimum) */
-    if (tts_ort_init(&tts->ort, model_dir, verbose) != 0) {
-        return -1;
-    }
-
     /* Load BPE tokenizer (same Qwen vocab as ASR) */
     char vocab_path[512];
     snprintf(vocab_path, sizeof(vocab_path), "%s/vocab.json", model_dir);
     tts->tokenizer = qwen_tokenizer_load(vocab_path);
     if (!tts->tokenizer) {
         fprintf(stderr, "TTS: failed to load tokenizer from %s\n", vocab_path);
-        tts_ort_free(&tts->ort);
         return -1;
     }
 
@@ -117,7 +108,6 @@ int tts_pipeline_init(TtsPipeline *tts, const char *model_dir, int verbose) {
     tts->native = (tts_native_ctx_t *)calloc(1, sizeof(tts_native_ctx_t));
     if (!tts->native) {
         fprintf(stderr, "TTS: failed to allocate native context\n");
-        tts_ort_free(&tts->ort);
         qwen_tokenizer_free(tts->tokenizer);
         tts->tokenizer = NULL;
         return -1;
@@ -136,7 +126,6 @@ int tts_pipeline_init(TtsPipeline *tts, const char *model_dir, int verbose) {
             fprintf(stderr, "TTS: native init failed (need model.safetensors in %s)\n", model_dir);
             free(tts->native);
             tts->native = NULL;
-            tts_ort_free(&tts->ort);
             qwen_tokenizer_free(tts->tokenizer);
             tts->tokenizer = NULL;
             return -1;
@@ -156,7 +145,6 @@ int tts_pipeline_init(TtsPipeline *tts, const char *model_dir, int verbose) {
             tts_native_free(tts->native);
             free(tts->native);
             tts->native = NULL;
-            tts_ort_free(&tts->ort);
             qwen_tokenizer_free(tts->tokenizer);
             tts->tokenizer = NULL;
             return -1;
@@ -199,14 +187,7 @@ void tts_pipeline_free(TtsPipeline *tts) {
         qwen_tokenizer_free(tts->tokenizer);
         tts->tokenizer = NULL;
     }
-    tts_ort_free(&tts->ort);
 }
-
-/* NOTE: The ONNX decode path (text_project, codec_embed, talker_prefill,
- * talker_decode, code_predictor) has been fully replaced by tts_native.c.
- * Only the ONNX infrastructure (env, session options, memory info) is kept
- * for potential future use (e.g. speaker_encoder for voice cloning). */
-
 
 /* ---- Main synthesis function ---- */
 
@@ -305,5 +286,3 @@ int tts_pipeline_synthesize(TtsPipeline *tts, const char *text,
 
     return 0;
 }
-
-#endif /* USE_ORT */

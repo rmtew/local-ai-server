@@ -17,7 +17,7 @@ Requires MSVC (Visual Studio C++ workload). Set `DEPS_ROOT` environment variable
 
 ```bash
 git submodule update --init
-C:/Data/R/git/claude-repos/local-ai-server/build.bat           # auto-detects OpenBLAS, CUDA, ONNX Runtime
+C:/Data/R/git/claude-repos/local-ai-server/build.bat           # auto-detects OpenBLAS, CUDA
 C:/Data/R/git/claude-repos/local-ai-server/build.bat bench     # vocoder benchmark
 ```
 
@@ -28,11 +28,10 @@ C:/Data/R/git/claude-repos/local-ai-server/build.bat bench     # vocoder benchma
 **Dependency locations** (auto-detected by build.bat):
 - OpenBLAS: `%DEPS_ROOT%/openblas/`
 - CUDA 12.x: system install (for cuBLAS GPU acceleration)
-- ONNX Runtime 1.23.2: `%DEPS_ROOT%/onnxruntime/1.23.2/`
 
 ### Linux (gcc / Makefile)
 
-Requires gcc and libopenblas-dev. No CUDA or ONNX Runtime support yet.
+Requires gcc and libopenblas-dev. No CUDA support yet.
 
 ```bash
 git submodule update --init
@@ -51,7 +50,7 @@ The Makefile also supports macOS (uses `-framework Accelerate` instead of OpenBL
 
 - Inference code (`qwen-asr/`, vocoder): `-O2 -march=native -ffast-math` (gcc) / `/O2 /arch:AVX2 /fp:fast` (MSVC)
 - Server code: `-g -DDEBUG` (gcc) / `/Od /Zi` (MSVC)
-- Conditional defines: `USE_BLAS`, `USE_CUBLAS`, `USE_CUDA_KERNELS`, `USE_ORT`
+- Conditional defines: `USE_BLAS`, `USE_CUBLAS`, `USE_CUDA_KERNELS`
 
 ## Running
 
@@ -95,7 +94,7 @@ python tts_regression.py --case short_hello    # Run specific case
 
 Reference WAVs stored in `tts_samples/` (tracked in git).
 
-Python verification scripts in `tools/` compare native C output against ONNX reference implementations. The `qwen-asr` submodule has its own regression suite (`asr_regression.py`).
+The `qwen-asr` submodule has its own regression suite (`asr_regression.py`).
 
 ## Architecture
 
@@ -115,7 +114,6 @@ Key TTS source files:
 - `tts_vocoder_ops.c` — Low-level ops: convolution, SnakeBeta, LayerNorm, GELU
 - `tts_vocoder_xfmr.c` — 8-layer pre-transformer with RoPE and RMSNorm
 - `tts_sampling.c` — Top-k sampling, repetition penalty
-- `tts_ort.c` — ONNX Runtime initialization (future voice cloning)
 
 ### API Endpoints
 
@@ -151,7 +149,7 @@ Standalone Qwen3-ASR inference engine. See `qwen-asr/AGENT.md` for its detailed 
 - **Sockets** — `http.h` provides `SOCKET`, `INVALID_SOCKET`, `closesocket` on both platforms. Use `SOCK_ERRNO` (in `http.c`) instead of `WSAGetLastError()`.
 - **String compat** — use `strdup` (not `_strdup`), `strncasecmp`-compatible via macros in `http.c`. Add `#ifdef _MSC_VER` / `#define strdup _strdup` when needed (see `handler_asr.c` pattern).
 - **Signal handling** — `main.c` uses `SetConsoleCtrlHandler` on Windows, `signal(SIGINT/SIGTERM)` on Linux.
-- **Conditional features** — CUDA (`USE_CUBLAS`) and ONNX Runtime (`USE_ORT`) are `#ifdef`-guarded and compile cleanly without. Linux builds currently have neither.
+- **Conditional features** — CUDA (`USE_CUBLAS`) is `#ifdef`-guarded and compiles cleanly without. Linux builds currently don't have CUDA.
 
 ## Key Documentation
 

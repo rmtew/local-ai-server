@@ -102,19 +102,6 @@ if exist "%CUDA_DIR%\lib\x64\cublas.lib" (
     echo CUDA not found -- GPU acceleration disabled
 )
 
-REM Detect ONNX Runtime (optional -- enables TTS via Qwen3-TTS ONNX models)
-set ORT_CFLAGS=
-set ORT_LIBS=
-set "ORT_CPU_DIR=%DEPS_ROOT%\onnxruntime\1.23.2"
-if exist "%ORT_CPU_DIR%\lib\onnxruntime.lib" (
-    echo ONNX Runtime found -- enabling TTS
-    set ORT_CFLAGS=/DUSE_ORT /I"%ORT_CPU_DIR%\include"
-    set ORT_LIBS="%ORT_CPU_DIR%\lib\onnxruntime.lib"
-    set "ORT_DIR=%ORT_CPU_DIR%"
-) else (
-    echo ONNX Runtime not found -- TTS disabled
-)
-
 REM Copy OpenBLAS DLL if not present
 if not exist "%BIN_DIR%\libopenblas.dll" (
     if exist "%OPENBLAS_DIR%\bin\libopenblas.dll" (
@@ -123,14 +110,6 @@ if not exist "%BIN_DIR%\libopenblas.dll" (
     ) else if exist "%OPENBLAS_DIR%\libopenblas.dll" (
         echo Copying libopenblas.dll...
         copy "%OPENBLAS_DIR%\libopenblas.dll" "%BIN_DIR%" >nul
-    )
-)
-
-REM Copy ONNX Runtime DLL (always update to match linked version)
-if defined ORT_DIR (
-    if exist "%ORT_DIR%\lib\onnxruntime.dll" (
-        echo Copying onnxruntime.dll...
-        copy /Y "%ORT_DIR%\lib\onnxruntime.dll" "%BIN_DIR%" >nul
     )
 )
 
@@ -152,7 +131,7 @@ REM Vocoder source files (compiled with optimization -- inference-critical, same
 set VOC_SOURCES=src\tts_vocoder.c src\tts_vocoder_ops.c src\tts_vocoder_xfmr.c src\tts_mel.c src\tts_speaker_enc.c
 
 echo Compiling vocoder (optimized)...
-cl /nologo /W3 /O2 /arch:AVX2 /fp:fast /DNDEBUG !BLAS_CFLAGS! !CUDA_CFLAGS! !ORT_CFLAGS! /I"%QWEN_ASR_DIR%" /Isrc /c %VOC_SOURCES% /Fo:"%BUILD_DIR%\\"
+cl /nologo /W3 /O2 /arch:AVX2 /fp:fast /DNDEBUG !BLAS_CFLAGS! !CUDA_CFLAGS! /I"%QWEN_ASR_DIR%" /Isrc /c %VOC_SOURCES% /Fo:"%BUILD_DIR%\\"
 if %ERRORLEVEL% NEQ 0 (
     echo Vocoder compilation failed.
     exit /b 1
@@ -166,22 +145,22 @@ if /I "%TARGET%"=="bench" goto :build_bench
 REM ---- Target: server (default) ----
 
 REM Server source files (excluding vocoder -- compiled separately with optimization)
-set SRV_SOURCES=src\main.c src\http.c src\multipart.c src\handler_asr.c src\json.c src\json_reader.c src\handler_tts.c src\tts_ort.c src\tts_pipeline.c src\tts_sampling.c src\tts_native.c src\tts_voice_presets.c
+set SRV_SOURCES=src\main.c src\http.c src\multipart.c src\handler_asr.c src\json.c src\json_reader.c src\handler_tts.c src\tts_pipeline.c src\tts_sampling.c src\tts_native.c src\tts_voice_presets.c
 
 REM Compile server sources with debug info
 echo Compiling server (debug)...
-cl /nologo /W3 /Od /Zi /DDEBUG !BLAS_CFLAGS! !CUDA_CFLAGS! !ORT_CFLAGS! /I"%QWEN_ASR_DIR%" /Isrc /c %SRV_SOURCES% /Fo:"%BUILD_DIR%\\"
+cl /nologo /W3 /Od /Zi /DDEBUG !BLAS_CFLAGS! !CUDA_CFLAGS! /I"%QWEN_ASR_DIR%" /Isrc /c %SRV_SOURCES% /Fo:"%BUILD_DIR%\\"
 if %ERRORLEVEL% NEQ 0 (
     echo Server compilation failed.
     exit /b 1
 )
 
 REM Collect server object files
-set SRV_OBJS="%BUILD_DIR%\main.obj" "%BUILD_DIR%\http.obj" "%BUILD_DIR%\multipart.obj" "%BUILD_DIR%\handler_asr.obj" "%BUILD_DIR%\json.obj" "%BUILD_DIR%\json_reader.obj" "%BUILD_DIR%\handler_tts.obj" "%BUILD_DIR%\tts_ort.obj" "%BUILD_DIR%\tts_pipeline.obj" "%BUILD_DIR%\tts_sampling.obj" "%BUILD_DIR%\tts_native.obj" "%BUILD_DIR%\tts_voice_presets.obj"
+set SRV_OBJS="%BUILD_DIR%\main.obj" "%BUILD_DIR%\http.obj" "%BUILD_DIR%\multipart.obj" "%BUILD_DIR%\handler_asr.obj" "%BUILD_DIR%\json.obj" "%BUILD_DIR%\json_reader.obj" "%BUILD_DIR%\handler_tts.obj" "%BUILD_DIR%\tts_pipeline.obj" "%BUILD_DIR%\tts_sampling.obj" "%BUILD_DIR%\tts_native.obj" "%BUILD_DIR%\tts_voice_presets.obj"
 
 REM Link everything together
 echo Linking server...
-link /nologo /DEBUG /SUBSYSTEM:CONSOLE /OUT:"%BIN_DIR%\local-ai-server.exe" %SRV_OBJS% %VOC_OBJS% %QWEN_OBJS% !BLAS_LIBS! !CUDA_LIBS! !ORT_LIBS! ws2_32.lib advapi32.lib psapi.lib
+link /nologo /DEBUG /SUBSYSTEM:CONSOLE /OUT:"%BIN_DIR%\local-ai-server.exe" %SRV_OBJS% %VOC_OBJS% %QWEN_OBJS% !BLAS_LIBS! !CUDA_LIBS! ws2_32.lib advapi32.lib psapi.lib
 
 if %ERRORLEVEL% EQU 0 (
     echo.
@@ -198,19 +177,19 @@ REM ---- Target: bench ----
 
 REM Bench uses shared TTS sources (no server main/http/handlers) + its own main
 REM Vocoder objs are already compiled above with optimization
-set BENCH_SOURCES=tools\vocoder_bench.c src\tts_ort.c src\tts_pipeline.c src\tts_sampling.c src\tts_native.c
+set BENCH_SOURCES=tools\vocoder_bench.c src\tts_pipeline.c src\tts_sampling.c src\tts_native.c
 
 echo Compiling vocoder-bench...
-cl /nologo /W3 /Od /Zi /DDEBUG !BLAS_CFLAGS! !CUDA_CFLAGS! !ORT_CFLAGS! /I"%QWEN_ASR_DIR%" /Isrc /c %BENCH_SOURCES% /Fo:"%BUILD_DIR%\\"
+cl /nologo /W3 /Od /Zi /DDEBUG !BLAS_CFLAGS! !CUDA_CFLAGS! /I"%QWEN_ASR_DIR%" /Isrc /c %BENCH_SOURCES% /Fo:"%BUILD_DIR%\\"
 if %ERRORLEVEL% NEQ 0 (
     echo Bench compilation failed.
     exit /b 1
 )
 
-set BENCH_OBJS="%BUILD_DIR%\vocoder_bench.obj" "%BUILD_DIR%\tts_ort.obj" "%BUILD_DIR%\tts_pipeline.obj" "%BUILD_DIR%\tts_sampling.obj" "%BUILD_DIR%\tts_native.obj"
+set BENCH_OBJS="%BUILD_DIR%\vocoder_bench.obj" "%BUILD_DIR%\tts_pipeline.obj" "%BUILD_DIR%\tts_sampling.obj" "%BUILD_DIR%\tts_native.obj"
 
 echo Linking vocoder-bench...
-link /nologo /DEBUG /SUBSYSTEM:CONSOLE /OUT:"%BIN_DIR%\vocoder-bench.exe" %BENCH_OBJS% %VOC_OBJS% %QWEN_OBJS% !BLAS_LIBS! !CUDA_LIBS! !ORT_LIBS! ws2_32.lib advapi32.lib psapi.lib
+link /nologo /DEBUG /SUBSYSTEM:CONSOLE /OUT:"%BIN_DIR%\vocoder-bench.exe" %BENCH_OBJS% %VOC_OBJS% %QWEN_OBJS% !BLAS_LIBS! !CUDA_LIBS! ws2_32.lib advapi32.lib psapi.lib
 
 if %ERRORLEVEL% EQU 0 (
     echo.

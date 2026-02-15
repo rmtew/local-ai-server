@@ -5,8 +5,7 @@
  * using the same infrastructure as qwen-asr: safetensors mmap, CPU kernels
  * with AVX2/OpenBLAS, and optional cuBLAS GPU GEMM offload.
  *
- * The vocoder (codec tokens -> audio) is NOT implemented here; it remains
- * in ONNX Runtime via tts_pipeline.c for now.
+ * The vocoder (codec tokens -> audio) is in tts_vocoder.c.
  */
 
 #define _CRT_SECURE_NO_WARNINGS
@@ -826,7 +825,7 @@ static int64_t *build_input_ids(tts_native_ctx_t *ctx, const char *text,
  * ======================================================================== */
 
 /* Build prefill embeddings and trailing text embeddings.
- * Matches the ONNX pipeline's build_prefill_embeddings exactly.
+ * Matches the reference Python pipeline's build_prefill_embeddings.
  * Returns 0 on success. Caller must free all output buffers. */
 static int build_prefill_embeddings(tts_native_ctx_t *ctx,
                                     const int64_t *input_ids, int n_ids, int role_len,
