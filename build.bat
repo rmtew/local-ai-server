@@ -5,6 +5,7 @@ REM
 REM Usage: build.bat [target]
 REM   (no target) - build server (default)
 REM   bench       - build vocoder-bench.exe
+REM   presets     - build voice-presets.exe
 
 setlocal EnableDelayedExpansion
 cd /d "%~dp0"
@@ -12,6 +13,7 @@ cd /d "%~dp0"
 REM Parse target (default: server)
 set TARGET=server
 if /I "%~1"=="bench" set TARGET=bench
+if /I "%~1"=="presets" set TARGET=presets
 
 REM Auto-setup MSVC environment if not already configured
 where cl.exe >nul 2>&1
@@ -139,8 +141,9 @@ if %ERRORLEVEL% NEQ 0 (
 
 set VOC_OBJS="%BUILD_DIR%\tts_vocoder.obj" "%BUILD_DIR%\tts_vocoder_ops.obj" "%BUILD_DIR%\tts_vocoder_xfmr.obj" "%BUILD_DIR%\tts_mel.obj" "%BUILD_DIR%\tts_speaker_enc.obj"
 
-REM ---- Target: bench ----
+REM ---- Target: bench / presets ----
 if /I "%TARGET%"=="bench" goto :build_bench
+if /I "%TARGET%"=="presets" goto :build_presets
 
 REM ---- Target: server (default) ----
 
@@ -194,6 +197,35 @@ link /nologo /DEBUG /SUBSYSTEM:CONSOLE /OUT:"%BIN_DIR%\vocoder-bench.exe" %BENCH
 if %ERRORLEVEL% EQU 0 (
     echo.
     echo Build complete: %BIN_DIR%\vocoder-bench.exe
+) else (
+    echo.
+    echo Build failed.
+    exit /b 1
+)
+goto :eof
+
+REM ---- Target: presets ----
+:build_presets
+
+REM Voice presets tool uses shared TTS sources + its own main
+REM Vocoder objs are already compiled above with optimization
+set PRESETS_SOURCES=tools\voice_presets.c src\tts_pipeline.c src\tts_sampling.c src\tts_native.c src\tts_voice_presets.c
+
+echo Compiling voice-presets...
+cl /nologo /W3 /Od /Zi /DDEBUG !BLAS_CFLAGS! !CUDA_CFLAGS! /I"%QWEN_ASR_DIR%" /Isrc /c %PRESETS_SOURCES% /Fo:"%BUILD_DIR%\\"
+if %ERRORLEVEL% NEQ 0 (
+    echo Voice-presets compilation failed.
+    exit /b 1
+)
+
+set PRESETS_OBJS="%BUILD_DIR%\voice_presets.obj" "%BUILD_DIR%\tts_pipeline.obj" "%BUILD_DIR%\tts_sampling.obj" "%BUILD_DIR%\tts_native.obj" "%BUILD_DIR%\tts_voice_presets.obj"
+
+echo Linking voice-presets...
+link /nologo /DEBUG /SUBSYSTEM:CONSOLE /OUT:"%BIN_DIR%\voice-presets.exe" %PRESETS_OBJS% %VOC_OBJS% %QWEN_OBJS% !BLAS_LIBS! !CUDA_LIBS! ws2_32.lib advapi32.lib psapi.lib
+
+if %ERRORLEVEL% EQU 0 (
+    echo.
+    echo Build complete: %BIN_DIR%\voice-presets.exe
 ) else (
     echo.
     echo Build failed.

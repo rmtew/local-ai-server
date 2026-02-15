@@ -1,6 +1,6 @@
 # tools/
 
-Scripts for model downloading and vocoder development/debugging.
+Scripts and native tools for model downloading, vocoder debugging, and voice preset generation.
 
 ## Download Scripts
 
@@ -42,4 +42,45 @@ All scripts expect to be run from the repository root and reference model files 
 
 | Script | Purpose |
 |--------|---------|
-| `generate_voice_presets.py` | Generate voice_presets.bin from reference WAV files |
+| `generate_voice_presets.py` | Generate voice_presets.bin from reference WAV files (Python, requires numpy) |
+
+## Native Tools
+
+Built with `build.bat <target>`. Output in `bin/`.
+
+### vocoder-bench (`build.bat bench`)
+
+Standalone vocoder benchmark. Runs the vocoder on saved codec tokens, reports per-stage timing, and compares output against references.
+
+### voice-presets (`build.bat presets`)
+
+Self-contained voice preset generation tool. Replaces the Python toolchain for computing speaker embeddings.
+
+**Subcommands:**
+
+| Command | Purpose |
+|---------|---------|
+| `extract` | Pull clips from media files via ffmpeg |
+| `generate` | Compute speaker embeddings and write `voice_presets.bin` |
+| `list` | Dump contents of an existing `voice_presets.bin` |
+
+**Examples:**
+
+```bash
+# Extract clips from a video
+voice-presets extract --input=movie.mp4 --name=Chelsie \
+    --timestamps="1:23-1:45, 3:10-3:22" --output-dir=voice_samples/
+
+# Generate presets with quality analysis
+voice-presets generate --model=/path/to/qwen3-tts-0.6b-base \
+    --samples=voice_samples/ --verbose
+
+# Generate with round-trip verification (loads full TTS pipeline)
+voice-presets generate --model=/path/to/qwen3-tts-0.6b-base \
+    --samples=voice_samples/ --roundtrip
+
+# List existing presets
+voice-presets list --presets=/path/to/voice_presets.bin
+```
+
+The `generate` command automatically prunes outlier clips (cosine similarity < 0.75 to centroid), checks convergence via leave-one-out stability, and reports quality metrics. With `--roundtrip`, it synthesizes a test sentence with each voice and measures how well the output embedding matches the input.

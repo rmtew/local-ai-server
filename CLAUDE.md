@@ -19,6 +19,7 @@ Requires MSVC (Visual Studio C++ workload). Set `DEPS_ROOT` environment variable
 git submodule update --init
 C:/Data/R/git/claude-repos/local-ai-server/build.bat           # auto-detects OpenBLAS, CUDA
 C:/Data/R/git/claude-repos/local-ai-server/build.bat bench     # vocoder benchmark
+C:/Data/R/git/claude-repos/local-ai-server/build.bat presets   # voice preset tool
 ```
 
 **Invoking `.bat` from Claude Code (git bash):** Use the full absolute path with forward slashes (e.g. `C:/Data/R/git/claude-repos/local-ai-server/build.bat`). Git bash delegates `.bat` files to the Windows command processor automatically. Do NOT wrap in `cmd.exe /c` or `cmd //c` — this causes quoting and environment problems.
