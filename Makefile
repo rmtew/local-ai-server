@@ -39,7 +39,9 @@ QWEN_SRCS = \
 VOC_SRCS = \
 	$(SRC_DIR)/tts_vocoder.c \
 	$(SRC_DIR)/tts_vocoder_ops.c \
-	$(SRC_DIR)/tts_vocoder_xfmr.c
+	$(SRC_DIR)/tts_vocoder_xfmr.c \
+	$(SRC_DIR)/tts_mel.c \
+	$(SRC_DIR)/tts_speaker_enc.c
 
 # Server (debug build)
 SRV_SRCS = \
@@ -53,7 +55,8 @@ SRV_SRCS = \
 	$(SRC_DIR)/tts_ort.c \
 	$(SRC_DIR)/tts_pipeline.c \
 	$(SRC_DIR)/tts_sampling.c \
-	$(SRC_DIR)/tts_native.c
+	$(SRC_DIR)/tts_native.c \
+	$(SRC_DIR)/tts_voice_presets.c
 
 # Object files (all go into build/)
 QWEN_OBJS = $(patsubst $(QWEN_DIR)/%.c,$(BUILD_DIR)/%.o,$(QWEN_SRCS))

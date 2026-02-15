@@ -166,10 +166,25 @@ int tts_pipeline_init(TtsPipeline *tts, const char *model_dir, int verbose) {
         }
     }
 
+    /* Load voice presets (optional) */
+    {
+        char preset_path[512];
+        snprintf(preset_path, sizeof(preset_path), "%s/voice_presets.bin", model_dir);
+        if (tts_voice_presets_load(&tts->voice_presets, preset_path) == 0) {
+            if (verbose) {
+                printf("TTS: loaded %d voice presets from %s\n",
+                       tts->voice_presets.n_presets, preset_path);
+            }
+        } else if (verbose) {
+            printf("TTS: no voice presets found (voice cloning unavailable)\n");
+        }
+    }
+
     return 0;
 }
 
 void tts_pipeline_free(TtsPipeline *tts) {
+    tts_voice_presets_free(&tts->voice_presets);
     if (tts->vocoder) {
         tts_vocoder_free(tts->vocoder);
         free(tts->vocoder);
@@ -196,6 +211,7 @@ void tts_pipeline_free(TtsPipeline *tts) {
 /* ---- Main synthesis function ---- */
 
 int tts_pipeline_synthesize(TtsPipeline *tts, const char *text,
+                            const char *voice, const char *language,
                             float temperature, int top_k, float speed,
                             TtsResult *result) {
     memset(result, 0, sizeof(*result));
@@ -210,10 +226,20 @@ int tts_pipeline_synthesize(TtsPipeline *tts, const char *text,
         printf("TTS synthesize: \"%s\"\n", text);
     }
 
+    /* Look up voice preset for speaker embedding */
+    const float *speaker_embed = NULL;
+    if (voice && voice[0]) {
+        speaker_embed = tts_voice_presets_find(&tts->voice_presets, voice);
+        if (tts->verbose && speaker_embed) {
+            printf("  voice preset '%s' found\n", voice);
+        }
+    }
+
     /* Native C+cuBLAS decode (talker + code predictor) */
     int n_steps = 0;
     int64_t *codes = NULL;
-    int rc = tts_native_decode(tts->native, text, temperature, top_k,
+    int rc = tts_native_decode(tts->native, text, language, speaker_embed,
+                                temperature, top_k,
                                 &codes, &n_steps);
     if (rc != 0 || !codes || n_steps == 0) {
         free(codes);

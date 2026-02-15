@@ -149,7 +149,7 @@ REM Collect qwen-asr object files (shared by all targets)
 set QWEN_OBJS="%BUILD_DIR%\qwen_asr.obj" "%BUILD_DIR%\qwen_asr_audio.obj" "%BUILD_DIR%\qwen_asr_decoder.obj" "%BUILD_DIR%\qwen_asr_encoder.obj" "%BUILD_DIR%\qwen_asr_kernels.obj" "%BUILD_DIR%\qwen_asr_kernels_avx.obj" "%BUILD_DIR%\qwen_asr_kernels_generic.obj" "%BUILD_DIR%\qwen_asr_safetensors.obj" "%BUILD_DIR%\qwen_asr_tokenizer.obj" "%BUILD_DIR%\qwen_asr_gpu.obj"
 
 REM Vocoder source files (compiled with optimization -- inference-critical, same as qwen-asr)
-set VOC_SOURCES=src\tts_vocoder.c src\tts_vocoder_ops.c src\tts_vocoder_xfmr.c
+set VOC_SOURCES=src\tts_vocoder.c src\tts_vocoder_ops.c src\tts_vocoder_xfmr.c src\tts_mel.c src\tts_speaker_enc.c
 
 echo Compiling vocoder (optimized)...
 cl /nologo /W3 /O2 /arch:AVX2 /fp:fast /DNDEBUG !BLAS_CFLAGS! !CUDA_CFLAGS! !ORT_CFLAGS! /I"%QWEN_ASR_DIR%" /Isrc /c %VOC_SOURCES% /Fo:"%BUILD_DIR%\\"
@@ -158,7 +158,7 @@ if %ERRORLEVEL% NEQ 0 (
     exit /b 1
 )
 
-set VOC_OBJS="%BUILD_DIR%\tts_vocoder.obj" "%BUILD_DIR%\tts_vocoder_ops.obj" "%BUILD_DIR%\tts_vocoder_xfmr.obj"
+set VOC_OBJS="%BUILD_DIR%\tts_vocoder.obj" "%BUILD_DIR%\tts_vocoder_ops.obj" "%BUILD_DIR%\tts_vocoder_xfmr.obj" "%BUILD_DIR%\tts_mel.obj" "%BUILD_DIR%\tts_speaker_enc.obj"
 
 REM ---- Target: bench ----
 if /I "%TARGET%"=="bench" goto :build_bench
@@ -166,7 +166,7 @@ if /I "%TARGET%"=="bench" goto :build_bench
 REM ---- Target: server (default) ----
 
 REM Server source files (excluding vocoder -- compiled separately with optimization)
-set SRV_SOURCES=src\main.c src\http.c src\multipart.c src\handler_asr.c src\json.c src\json_reader.c src\handler_tts.c src\tts_ort.c src\tts_pipeline.c src\tts_sampling.c src\tts_native.c
+set SRV_SOURCES=src\main.c src\http.c src\multipart.c src\handler_asr.c src\json.c src\json_reader.c src\handler_tts.c src\tts_ort.c src\tts_pipeline.c src\tts_sampling.c src\tts_native.c src\tts_voice_presets.c
 
 REM Compile server sources with debug info
 echo Compiling server (debug)...
@@ -177,7 +177,7 @@ if %ERRORLEVEL% NEQ 0 (
 )
 
 REM Collect server object files
-set SRV_OBJS="%BUILD_DIR%\main.obj" "%BUILD_DIR%\http.obj" "%BUILD_DIR%\multipart.obj" "%BUILD_DIR%\handler_asr.obj" "%BUILD_DIR%\json.obj" "%BUILD_DIR%\json_reader.obj" "%BUILD_DIR%\handler_tts.obj" "%BUILD_DIR%\tts_ort.obj" "%BUILD_DIR%\tts_pipeline.obj" "%BUILD_DIR%\tts_sampling.obj" "%BUILD_DIR%\tts_native.obj"
+set SRV_OBJS="%BUILD_DIR%\main.obj" "%BUILD_DIR%\http.obj" "%BUILD_DIR%\multipart.obj" "%BUILD_DIR%\handler_asr.obj" "%BUILD_DIR%\json.obj" "%BUILD_DIR%\json_reader.obj" "%BUILD_DIR%\handler_tts.obj" "%BUILD_DIR%\tts_ort.obj" "%BUILD_DIR%\tts_pipeline.obj" "%BUILD_DIR%\tts_sampling.obj" "%BUILD_DIR%\tts_native.obj" "%BUILD_DIR%\tts_voice_presets.obj"
 
 REM Link everything together
 echo Linking server...

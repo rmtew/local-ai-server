@@ -77,7 +77,7 @@ bash tools/download_tts_models.sh
 bin/local-ai-server.exe --model=path/to/qwen-asr-model
 
 # TTS only
-bin/local-ai-server.exe --tts-model=path/to/qwen3-tts-0.6b
+bin/local-ai-server.exe --tts-model=path/to/qwen3-tts-12hz-0.6b-base
 
 # Both ASR and TTS
 bin/local-ai-server.exe --model=path/to/asr --tts-model=path/to/tts --verbose
@@ -139,7 +139,10 @@ Synthesize speech. JSON body, returns WAV audio.
 ```
 
 - `input` (required) -- Text to synthesize
-- `voice` -- Voice name (currently accepted but not used for voice selection)
+- `voice` -- Voice preset name (selects precomputed speaker embedding if available)
+- `language` -- Language hint: `"auto"` (default), `"english"`, `"chinese"`, `"german"`, `"spanish"`, `"japanese"`, `"french"`, `"korean"`, `"russian"`, `"italian"`, `"portuguese"`
+- `temperature` -- Sampling temperature (default 0.9)
+- `top_k` -- Top-k sampling (default 50)
 - `speed` -- Playback speed multiplier (0.25 to 4.0, default 1.0)
 - `seed` -- Integer seed for deterministic output (forces single-threaded inference; omit for default behavior)
 - `response_format` -- `"wav"` (default)

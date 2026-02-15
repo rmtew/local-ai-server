@@ -210,10 +210,10 @@ Peak scratch allocation reduced from ~250 MB to ~75 MB.
 
 ```bash
 # 1. Generate reference (one-time, --model points to TTS model dir)
-bin/vocoder-bench.exe --model=$DEPS_ROOT/models/tts/qwen3-tts-0.6b --generate
+bin/vocoder-bench.exe --model=$DEPS_ROOT/models/tts/qwen3-tts-12hz-0.6b-base --generate
 
 # 2. Baseline measurement (--model auto-resolves Tokenizer-12Hz subdir)
-bin/vocoder-bench.exe --model=$DEPS_ROOT/models/tts/qwen3-tts-0.6b \
+bin/vocoder-bench.exe --model=$DEPS_ROOT/models/tts/qwen3-tts-12hz-0.6b-base \
     --codes=bench_ref.codes --ref=bench_ref.raw --runs=3
 
 # 3. After each optimization: rebuild bench, re-run step 2, record results below

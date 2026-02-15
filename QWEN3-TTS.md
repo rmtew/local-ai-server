@@ -18,7 +18,7 @@ Two model directories are needed, expected as siblings on disk:
 
 ```
 models/tts/
-  qwen3-tts-0.6b/               <-- passed via --tts-model
+  qwen3-tts-12hz-0.6b-base/     <-- passed via --tts-model
     model.safetensors            (1.9 GB) -- talker + code predictor weights
     config.json
     vocab.json
@@ -41,7 +41,7 @@ bash tools/download_tts_models.sh
 
 This downloads everything needed for native inference:
 
-- `model.safetensors` (1.9 GB) from [`Qwen/Qwen3-TTS-0.6B`](https://huggingface.co/Qwen/Qwen3-TTS-0.6B) -- talker + code predictor weights
+- `model.safetensors` (1.9 GB) from [`Qwen/Qwen3-TTS-12Hz-0.6B-Base`](https://huggingface.co/Qwen/Qwen3-TTS-12Hz-0.6B-Base) -- talker + code predictor + speaker encoder weights
 - `model.safetensors` (682 MB) from [`Qwen/Qwen3-TTS-Tokenizer-12Hz`](https://huggingface.co/Qwen/Qwen3-TTS-Tokenizer-12Hz) -- vocoder weights
 - Tokenizer files (vocab.json, merges.txt, etc.) from [`zukky/Qwen3-TTS-ONNX-DLL`](https://huggingface.co/zukky/Qwen3-TTS-ONNX-DLL)
 
@@ -55,7 +55,7 @@ Input text is tokenized using the Qwen2 BPE tokenizer (151,643 tokens). Token em
 
 A 28-layer Qwen3 transformer generates codec tokens autoregressively:
 - Hidden size: 1024, 16 attention heads, GQA with 4 KV heads
-- Sampling: top-k (k=50) with temperature 0.3 and repetition penalty 1.05
+- Sampling: top-k (k=50) with temperature 0.9 (configurable) and repetition penalty 1.05
 - Each step produces one first-codebook token (from vocabulary of 2048)
 
 Implementation: `src/tts_native.c` (~1900 lines). Weights loaded from `model.safetensors` (BF16, converted to FP32 at load). KV cache maintained across steps.
@@ -151,106 +151,60 @@ Note: ONNX Runtime with CUDA ExecutionProvider was tested but was ~2x slower tha
 | `tts_ort.c` | ~115 | ONNX Runtime initialization (for future voice cloning) |
 | `tts_sampling.c` | ~115 | Top-k sampling, repetition penalty |
 
-## Voice Cloning (Not Yet Implemented)
+## Voice Cloning
 
-Voice cloning requires the **Base** model variant (`Qwen3-TTS-12Hz-0.6B-Base`), which includes a speaker encoder that the plain model does not have. The infrastructure stub exists (`tts_ort.c` loads an optional `speaker_encoder.onnx`), but no actual voice cloning logic is wired up.
+Our model IS the Base variant (`Qwen3-TTS-12Hz-0.6B-Base`), which includes 76 `speaker_encoder.*` tensors (~17 MB ECAPA-TDNN) alongside the talker and code predictor weights. Voice cloning uses precomputed speaker embeddings stored in `voice_presets.bin`.
 
-### How It Works Upstream
+### How It Works
 
 The [qwen-tts Python package](https://github.com/QwenLM/Qwen3-TTS) supports two voice cloning modes:
 
-1. **X-vector only** (`x_vector_only_mode=True`): Reference audio is processed through the speaker encoder to produce a 1024-dim embedding. This embedding is inserted as a single extra token in the talker LM's input sequence. No reference text needed. Simpler but lower quality.
+1. **X-vector only** (`x_vector_only_mode=True`): Reference audio is processed through the speaker encoder to produce a 1024-dim embedding. This embedding is inserted as a single extra token in the talker LM's input sequence. No reference text needed. **This is the mode we implement.**
 
-2. **Full in-context learning** (`x_vector_only_mode=False`): Reference audio is tokenized through the codec (audio -> codes), reference text is encoded, and both are prepended to the input alongside the speaker embedding. The talker LM does in-context learning from the reference speech+text pair. Higher quality, requires reference transcript.
+2. **Full in-context learning** (`x_vector_only_mode=False`): Reference audio is tokenized through the codec, reference text is encoded, and both are prepended to the input alongside the speaker embedding. Higher quality, requires reference transcript. Not yet implemented.
 
-### Speaker Encoder Architecture
+### Speaker Encoder Architecture (ECAPA-TDNN)
 
-The speaker encoder is an **ECAPA-TDNN** ([Emphasized Channel Attention, Propagation and Aggregation in TDNN](https://huggingface.co/papers/2005.07143)):
+Implemented in `tts_speaker_enc.c/.h`. Weights loaded from `speaker_encoder.*` tensors in `model.safetensors`.
 
 ```
 Audio (24 kHz)
   |
   v
-Mel spectrogram (n_fft=1024, hop=256, win=1024, 128 mels, fmin=0, fmax=12000)
+Mel spectrogram (tts_mel.c: n_fft=1024, hop=256, win=1024, 128 mels, fmin=0, fmax=12000)
   |
   v
-TimeDelayNetBlock (initial TDNN layer)
+Block 0: Conv1d(128->512, k=5) + ReLU
   |
   v
-SqueezeExcitationRes2NetBlock (x N layers, multi-scale residual + channel attention)
+Blocks 1-3: SE-Res2Net (scale=8, dilations 2/3/4, squeeze-excitation channel attention)
   |
   v
-Multi-Layer Feature Aggregation (TDNN concatenating all prior layer outputs)
+MFA: concat(block1,block2,block3) -> Conv1d(1536->1536, k=1) + ReLU
   |
   v
-AttentiveStatisticsPooling (attention-weighted mean + std, collapses time axis)
+ASP: Attentive Statistics Pooling (attention-weighted mean + std)
   |
   v
-Linear projection -> 1024-dim speaker embedding
+FC: Conv1d(3072->1024, k=1) -> 1024-dim speaker embedding
 ```
-
-Weights are stored under `speaker_encoder.*` keys in the Base model's `model.safetensors`. Config specifies `enc_dim: 1024`, `sample_rate: 24000`.
 
 ### Speaker Embedding Injection
 
-The 1024-dim embedding is concatenated as a single token in the codec input embedding sequence:
-
-```python
-# Without speaker:
-codec_input = cat([codec_embedding_0, codec_embedding_1], dim=1)
-
-# With speaker:
-codec_input = cat([codec_embedding_0, speaker_embed.view(1,1,-1), codec_embedding_1], dim=1)
-```
-
-No cross-attention or extra conditioning layers -- just one additional position in the sequence for the talker's self-attention to attend to.
-
-### Implementation Plan
-
-The same iterative approach used for the vocoder (ONNX reference, then native C replacement with output comparison) applies here.
-
-**Phase 1: ONNX reference**
-
-1. Download the Base model variant (`Qwen3-TTS-12Hz-0.6B-Base`)
-2. Export the `Qwen3TTSSpeakerEncoder` module to ONNX from Python
-3. Run with test audio, capture mel-spectrogram input and 1024-dim output
-4. Load the exported ONNX in `tts_ort.c` (infrastructure already exists)
-
-**Phase 2: Native C replacement**
-
-The ECAPA-TDNN building blocks are:
-- Conv1d (already implemented for vocoder: `voc_conv1d_causal`)
-- BatchNorm1d (new, but straightforward -- learned scale/bias after normalization)
-- ReLU (trivial)
-- Squeeze-and-Excitation (global avg pool -> FC -> ReLU -> FC -> sigmoid -> scale)
-- Res2Net (multi-scale grouped convolutions with cumulative concatenation)
-- Attentive Statistics Pooling (attention-weighted mean + std across time)
-- Linear projection (single matmul)
-
-Many of these reuse existing vocoder ops. The encoder is significantly smaller and simpler than the vocoder.
-
-**Phase 3: Mel spectrogram**
-
-Compute 128-band mel spectrograms in C (STFT + mel filterbank). This may overlap with ASR preprocessing if whisper.cpp's mel computation can be adapted (whisper uses 80 mels at 16 kHz; this needs 128 mels at 24 kHz).
-
-**Phase 4: Talker integration**
-
-Modify `build_prefill_embeddings()` in `tts_native.c` to accept an optional speaker embedding and insert it at the correct position in the codec input sequence. The KV cache offset would shift by 1 when a speaker embedding is present.
-
-### Required Model Files
-
-For voice cloning, the Base model variant is needed in addition to the existing models:
+The 1024-dim embedding is inserted as a single token between the two parts of the codec prefix in `build_prefill_embeddings()`:
 
 ```
-models/tts/
-  qwen3-tts-0.6b-base/          <-- new, for voice cloning
-    model.safetensors            (includes speaker_encoder.* weights)
-    config.json
-  qwen3-tts-0.6b/               <-- existing, for standard TTS
-    model.safetensors
-    ...
-  Qwen3-TTS-Tokenizer-12Hz/     <-- existing vocoder
-    model.safetensors
+Without speaker:  [think, think_bos, lang_id, think_eos, pad, bos]
+With speaker:     [think, think_bos, lang_id, think_eos, SPEAKER, pad, bos]
 ```
 
-The Base model talker weights may differ from the plain model, so they may not be interchangeable. The speaker encoder weights are only present in the Base variant.
+Text side pairs the speaker position with a `tts_pad` embedding. Prefill length increases by 1.
+
+### Voice Presets
+
+Precomputed 1024-dim embeddings stored in `<tts-model-dir>/voice_presets.bin`. Loaded at startup by `tts_voice_presets.c`. The `voice` parameter in the API selects a preset by name.
+
+Generate presets from reference WAV files:
+```bash
+python tools/generate_voice_presets.py --samples-dir voice_samples/ --output voice_presets.bin
+```

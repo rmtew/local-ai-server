@@ -16,6 +16,7 @@
 #include "qwen_asr.h"           /* qwen_config_t, qwen_dec_layer_t, etc. */
 #include "qwen_asr_safetensors.h"
 #include "qwen_asr_tokenizer.h"
+#include "tts_speaker_enc.h"
 #include <stdint.h>
 
 /* ========================================================================
@@ -108,6 +109,9 @@ typedef struct {
     /* Tokenizer */
     qwen_tokenizer_t *tokenizer;
 
+    /* Speaker encoder (optional, Base model only) */
+    tts_speaker_enc_ctx_t speaker_enc;
+
     /* Model files (kept open for mmap) */
     multi_safetensors_t *safetensors;
 
@@ -169,10 +173,13 @@ int tts_native_init(tts_native_ctx_t *ctx, const char *model_dir,
 void tts_native_free(tts_native_ctx_t *ctx);
 
 /* Run talker + code predictor to produce codec tokens.
+ * language: language string ("auto", "english", "chinese", etc.) or NULL for auto.
+ * speaker_embed: optional 1024-dim speaker embedding (NULL for default voice).
  * Returns 0 on success. Caller must free *codes_out.
  * codes_out: [n_steps * 16] int64 array of codec tokens
  * n_steps_out: number of decode steps */
 int tts_native_decode(tts_native_ctx_t *ctx, const char *text,
+                      const char *language, const float *speaker_embed,
                       float temperature, int top_k,
                       int64_t **codes_out, int *n_steps_out);
 

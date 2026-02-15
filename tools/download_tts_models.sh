@@ -3,7 +3,7 @@
 # Usage: bash tools/download_tts_models.sh
 #
 # Downloads:
-#   $DEPS_ROOT/models/tts/qwen3-tts-0.6b/
+#   $DEPS_ROOT/models/tts/qwen3-tts-12hz-0.6b-base/
 #     model.safetensors          (1.9 GB) -- talker + code predictor weights
 #     vocab.json, merges.txt, config.json, tokenizer_config.json
 #   $DEPS_ROOT/models/tts/Qwen3-TTS-Tokenizer-12Hz/
@@ -16,7 +16,7 @@ if [ -z "$DEPS_ROOT" ]; then
     exit 1
 fi
 
-MODEL_DIR="$DEPS_ROOT/models/tts/qwen3-tts-0.6b"
+MODEL_DIR="$DEPS_ROOT/models/tts/qwen3-tts-12hz-0.6b-base"
 VOCODER_DIR="$DEPS_ROOT/models/tts/Qwen3-TTS-Tokenizer-12Hz"
 mkdir -p "$MODEL_DIR" "$VOCODER_DIR"
 
@@ -38,9 +38,9 @@ echo ""
 # --- Talker + code predictor weights (safetensors, native C+cuBLAS) ---
 echo "[1/3] Talker + code predictor weights (1.9 GB)"
 download \
-    "https://huggingface.co/Qwen/Qwen3-TTS-0.6B/resolve/main/model.safetensors" \
+    "https://huggingface.co/Qwen/Qwen3-TTS-12Hz-0.6B-Base/resolve/main/model.safetensors" \
     "$MODEL_DIR/model.safetensors" \
-    "model.safetensors (Qwen3-TTS-0.6B)"
+    "model.safetensors (Qwen3-TTS-12Hz-0.6B-Base)"
 
 echo ""
 

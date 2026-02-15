@@ -5,7 +5,7 @@ import onnx
 import os
 
 os.chdir(r"C:\Data\R\git\claude-repos\local-ai-server")
-ONNX_MODEL = r"C:\Data\R\git\claude-repos\deps\models\tts\qwen3-tts-0.6b\tokenizer12hz_decode.onnx"
+ONNX_MODEL = r"C:\Data\R\git\claude-repos\deps\models\tts\qwen3-tts-12hz-0.6b-base\tokenizer12hz_decode.onnx"
 
 # Same codes as before
 codes_lines = """1995 844 1357 1690 2028 1626 1579 1827 1179 1124 1868 1685 1273 856 177 1635

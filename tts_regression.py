@@ -214,7 +214,8 @@ def rms(samples: Sequence[float]) -> float:
 # ---- Server communication ----
 
 def tts_request(
-    server: str, text: str, speed: float, seed: int, timeout_s: int
+    server: str, text: str, speed: float, seed: int, timeout_s: int,
+    temperature: float = 0.3,
 ) -> Optional[bytes]:
     """Send a TTS request and return WAV bytes, or None on error."""
     payload = json.dumps({
@@ -222,6 +223,7 @@ def tts_request(
         "voice": "alloy",
         "speed": speed,
         "seed": seed,
+        "temperature": temperature,
     }).encode("utf-8")
 
     req = urllib.request.Request(

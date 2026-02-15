@@ -50,8 +50,11 @@ void handle_tts_speech(SOCKET client, const HttpRequest *request,
     char input_text[4096] = {0};
     char voice[64] = {0};
     char response_format[32] = {0};
+    char language[32] = {0};
     double speed = 1.0;
     double seed = -1.0;
+    double temperature = 0.9;
+    double top_k_d = 50.0;
 
     int input_len = jr_get_string((const char *)request->body, request->body_len,
                                    "input", input_text, sizeof(input_text));
@@ -59,10 +62,16 @@ void handle_tts_speech(SOCKET client, const HttpRequest *request,
                    "voice", voice, sizeof(voice));
     jr_get_string((const char *)request->body, request->body_len,
                    "response_format", response_format, sizeof(response_format));
+    jr_get_string((const char *)request->body, request->body_len,
+                   "language", language, sizeof(language));
     jr_get_double((const char *)request->body, request->body_len,
                    "speed", &speed);
     jr_get_double((const char *)request->body, request->body_len,
                    "seed", &seed);
+    jr_get_double((const char *)request->body, request->body_len,
+                   "temperature", &temperature);
+    jr_get_double((const char *)request->body, request->body_len,
+                   "top_k", &top_k_d);
 
     if (input_len <= 0 || input_text[0] == '\0') {
         http_send_json_error(client, 400,
@@ -80,11 +89,17 @@ void handle_tts_speech(SOCKET client, const HttpRequest *request,
         return;
     }
 
+    int top_k = (int)top_k_d;
+    if (top_k < 1) top_k = 50;
+
     if (ctx->verbose) {
-        printf("  TTS request: input=\"%.60s%s\", voice=%s, speed=%.1f, seed=%d\n",
+        printf("  TTS request: input=\"%.60s%s\", voice=%s, lang=%s, temp=%.2f, top_k=%d, speed=%.1f, seed=%d\n",
                input_text,
                strlen(input_text) > 60 ? "..." : "",
                voice[0] ? voice : "default",
+               language[0] ? language : "auto",
+               temperature,
+               top_k,
                speed,
                seed >= 0.0 ? (int)seed : -1);
     }
@@ -100,9 +115,10 @@ void handle_tts_speech(SOCKET client, const HttpRequest *request,
 
     /* Run synthesis */
     TtsResult result;
-    int rc = tts_pipeline_synthesize(ctx->tts, input_text,
-                                      0.3f,    /* temperature */
-                                      50,      /* top_k */
+    const char *v = voice[0] ? voice : NULL;
+    const char *lang = language[0] ? language : NULL;
+    int rc = tts_pipeline_synthesize(ctx->tts, input_text, v, lang,
+                                      (float)temperature, top_k,
                                       (float)speed,
                                       &result);
 

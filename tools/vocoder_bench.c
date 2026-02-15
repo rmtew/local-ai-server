@@ -233,7 +233,7 @@ static int do_generate(const char *model_dir, const char *out_codes_path,
     /* Use tts_native_decode to get codec tokens (srand(42) makes sampling deterministic) */
     int n_steps = 0;
     int64_t *codes = NULL;
-    int rc = tts_native_decode(tts.native, text, 0.3f, 50, &codes, &n_steps);
+    int rc = tts_native_decode(tts.native, text, NULL, NULL, 0.3f, 50, &codes, &n_steps);
     if (rc != 0 || !codes || n_steps == 0) {
         fprintf(stderr, "Error: native decode failed\n");
         tts_pipeline_free(&tts);

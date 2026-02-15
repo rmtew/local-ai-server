@@ -737,6 +737,44 @@ static void code_predictor_forward(tts_native_ctx_t *ctx,
 }
 
 /* ========================================================================
+ * Language ID Resolution
+ * ======================================================================== */
+
+/* Resolve language string to codec language_id.
+ * Returns language_id >= 0, or -1 for "auto" (nothink path). */
+static int resolve_language_id(const char *language) {
+    if (!language || language[0] == '\0')
+        return -1;  /* auto */
+
+    /* Case-insensitive comparison */
+    static const struct { const char *name; int id; } lang_map[] = {
+        { "chinese",    2055 },
+        { "english",    2050 },
+        { "german",     2053 },
+        { "spanish",    2054 },
+        { "japanese",   2058 },
+        { "french",     2061 },
+        { "korean",     2064 },
+        { "russian",    2069 },
+        { "italian",    2070 },
+        { "portuguese", 2071 },
+    };
+    static const int n_langs = sizeof(lang_map) / sizeof(lang_map[0]);
+
+    for (int i = 0; i < n_langs; i++) {
+#ifdef _MSC_VER
+        if (_stricmp(language, lang_map[i].name) == 0)
+#else
+        if (strcasecmp(language, lang_map[i].name) == 0)
+#endif
+            return lang_map[i].id;
+    }
+
+    /* "auto" or any unrecognized string -> auto */
+    return -1;
+}
+
+/* ========================================================================
  * Input Token Sequence
  * ======================================================================== */
 
@@ -792,6 +830,8 @@ static int64_t *build_input_ids(tts_native_ctx_t *ctx, const char *text,
  * Returns 0 on success. Caller must free all output buffers. */
 static int build_prefill_embeddings(tts_native_ctx_t *ctx,
                                     const int64_t *input_ids, int n_ids, int role_len,
+                                    int language_id,
+                                    const float *speaker_embed,
                                     float **prefill_out, int *prefill_len_out,
                                     float **trailing_out, int *trailing_len_out,
                                     float **tts_pad_embed_out) {
@@ -830,9 +870,6 @@ static int build_prefill_embeddings(tts_native_ctx_t *ctx,
     int64_t codec_prefix[6];
     int n_codec;
 
-    /* TODO: add language parameter to API */
-    int language_id = 2055;  /* Chinese (hardcoded for now) */
-
     if (language_id >= 0) {
         codec_prefix[0] = 2154;  /* codec_think_id */
         codec_prefix[1] = TTS_CODEC_THINK_BOS;
@@ -850,41 +887,57 @@ static int build_prefill_embeddings(tts_native_ctx_t *ctx,
         n_codec = 5;
     }
 
-    float *codec_embed = (float *)malloc((size_t)n_codec * H * sizeof(float));
+    /* Build codec embedding array, optionally inserting speaker embed.
+     * Speaker embed goes after think_eos (at position n_codec-2, before pad+bos). */
+    int n_codec_eff = n_codec + (speaker_embed ? 1 : 0);
+    float *codec_embed = (float *)malloc((size_t)n_codec_eff * H * sizeof(float));
     if (!codec_embed) { free(tts_special_embed); free(role_embed); free(*tts_pad_embed_out); return -1; }
-    for (int i = 0; i < n_codec; i++)
-        codec_embed_lookup(ctx, (int)codec_prefix[i], codec_embed + i * H);
+
+    /* Insert point: after think_eos = n_codec - 2 (before pad, bos) */
+    int insert_at = n_codec - 2;  /* index of pad in original */
+    {
+        int dst = 0;
+        for (int i = 0; i < n_codec; i++) {
+            if (i == insert_at && speaker_embed) {
+                /* Insert speaker embedding (raw 1024-dim, already in model space) */
+                memcpy(codec_embed + dst * H, speaker_embed, H * sizeof(float));
+                dst++;
+            }
+            codec_embed_lookup(ctx, (int)codec_prefix[i], codec_embed + dst * H);
+            dst++;
+        }
+    }
 
     /* 4. First text token embedding via text_project */
     float text_first_embed[TTS_HIDDEN_SIZE];
     text_embed_and_project(ctx, &input_ids[role_len], 1, text_first_embed);
 
     /* 5. Assemble prefill:
-     *   [role(role_len), pad*N+bos + codec[:-1], text_first + codec[-1]]
-     *   N = n_codec - 2, so combined part = (n_codec-1) positions
-     *   Total = role_len + (n_codec-1) + 1 = role_len + n_codec */
-    int n_combined = n_codec - 1;  /* text_side + codec[:-1] */
+     *   [role(role_len), pad*N+bos + codec_eff[:-1], text_first + codec_eff[-1]]
+     *   N = n_codec_eff - 2, so combined part = (n_codec_eff-1) positions
+     *   Total = role_len + (n_codec_eff-1) + 1 = role_len + n_codec_eff */
+    int n_combined = n_codec_eff - 1;
     int pf_len = role_len + n_combined + 1;
     float *pf = (float *)calloc((size_t)pf_len * H, sizeof(float));
     if (!pf) { free(tts_special_embed); free(role_embed); free(*tts_pad_embed_out); free(codec_embed); return -1; }
 
     memcpy(pf, role_embed, (size_t)role_len * H * sizeof(float));
 
-    /* Combined: [pad * (n_codec-2), bos] + codec[:-1] */
+    /* Combined: [pad * (n_codec_eff-2), bos] + codec_eff[:-1] */
     int off = role_len * H;
-    int n_pad = n_codec - 2;
+    int n_pad = n_codec_eff - 2;
     for (int i = 0; i < n_pad; i++) {
         for (int j = 0; j < H; j++)
             pf[off + i * H + j] = tts_pad_embed[j] + codec_embed[i * H + j];
     }
-    /* bos + codec[n_pad] */
+    /* bos + codec_eff[n_pad] */
     for (int j = 0; j < H; j++)
         pf[off + n_pad * H + j] = tts_bos_embed[j] + codec_embed[n_pad * H + j];
 
-    /* First text + codec[-1] (last codec token) */
+    /* First text + codec_eff[-1] (last codec token) */
     off = (role_len + n_combined) * H;
     for (int j = 0; j < H; j++)
-        pf[off + j] = text_first_embed[j] + codec_embed[(n_codec - 1) * H + j];
+        pf[off + j] = text_first_embed[j] + codec_embed[(n_codec_eff - 1) * H + j];
 
     free(codec_embed);
 
@@ -1198,6 +1251,9 @@ int tts_native_init(tts_native_ctx_t *ctx, const char *model_dir,
     if (load_embedding_weights(ctx) != 0) goto fail;
     if (verbose) printf("TTS native: embedding weights loaded\n");
 
+    /* Try to load speaker encoder (Base model only, not an error if missing) */
+    tts_speaker_enc_init(&ctx->speaker_enc, ctx->safetensors, verbose);
+
     /* Load tokenizer */
     char vocab_path[512];
     snprintf(vocab_path, sizeof(vocab_path), "%s/vocab.json", model_dir);
@@ -1232,6 +1288,9 @@ fail:
 }
 
 void tts_native_free(tts_native_ctx_t *ctx) {
+    /* Free speaker encoder */
+    tts_speaker_enc_free(&ctx->speaker_enc);
+
     /* Free fused weights (allocated, not mmap'd) */
     for (int i = 0; i < TTS_TALKER_LAYERS; i++)
         free(ctx->talker.layers[i].gate_up_fused_bf16);
@@ -1298,6 +1357,7 @@ void tts_native_free(tts_native_ctx_t *ctx) {
 }
 
 int tts_native_decode(tts_native_ctx_t *ctx, const char *text,
+                      const char *language, const float *speaker_embed,
                       float temperature, int top_k,
                       int64_t **codes_out, int *n_steps_out) {
     *codes_out = NULL;
@@ -1323,7 +1383,9 @@ int tts_native_decode(tts_native_ctx_t *ctx, const char *text,
     float *prefill_data = NULL, *trailing_data = NULL, *tts_pad_embed = NULL;
     int prefill_len = 0, trailing_len = 0;
 
+    int lang_id = resolve_language_id(language);
     int rc = build_prefill_embeddings(ctx, input_ids, n_ids, role_len,
+                                       lang_id, speaker_embed,
                                        &prefill_data, &prefill_len,
                                        &trailing_data, &trailing_len,
                                        &tts_pad_embed);

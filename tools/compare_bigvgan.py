@@ -4,7 +4,7 @@ import onnx, onnxruntime as ort
 import os
 
 os.chdir(r"C:\Data\R\git\claude-repos\local-ai-server")
-ONNX_MODEL = r"C:\Data\R\git\claude-repos\deps\models\tts\qwen3-tts-0.6b\tokenizer12hz_decode.onnx"
+ONNX_MODEL = r"C:\Data\R\git\claude-repos\deps\models\tts\qwen3-tts-12hz-0.6b-base\tokenizer12hz_decode.onnx"
 
 # Load codes
 codes = np.fromfile("voc_codes.raw", dtype=np.int64)

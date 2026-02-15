@@ -13,6 +13,7 @@
 #include "tts_ort.h"
 #include "tts_native.h"
 #include "tts_vocoder.h"
+#include "tts_voice_presets.h"
 #include "qwen_asr_tokenizer.h"
 #include <stddef.h>
 
@@ -31,6 +32,7 @@ typedef struct {
     qwen_tokenizer_t *tokenizer;
     tts_native_ctx_t *native;   /* Native C+cuBLAS talker + code predictor */
     tts_vocoder_ctx_t *vocoder; /* Native C vocoder */
+    tts_voice_presets_t voice_presets; /* Precomputed speaker embeddings */
     int verbose;
 } TtsPipeline;
 
@@ -43,13 +45,16 @@ int tts_pipeline_init(TtsPipeline *tts, const char *model_dir, int verbose);
 void tts_pipeline_free(TtsPipeline *tts);
 
 /* Synthesize speech from text.
- * temperature: sampling temperature (0.3 default)
+ * voice: voice preset name (NULL for default voice)
+ * language: language hint ("auto", "english", "chinese", etc.) or NULL for auto
+ * temperature: sampling temperature (0.9 default)
  * top_k: top-k sampling (50 default)
  * speed: playback speed multiplier (1.0 default, adjusts WAV sample rate)
  *
  * Returns 0 on success with result filled in.
  * Caller must free result->wav_data. */
 int tts_pipeline_synthesize(TtsPipeline *tts, const char *text,
+                            const char *voice, const char *language,
                             float temperature, int top_k, float speed,
                             TtsResult *result);
 

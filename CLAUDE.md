@@ -58,7 +58,7 @@ The Makefile also supports macOS (uses `-framework Accelerate` instead of OpenBL
 ```bash
 bin/local-ai-server.exe \
   --model=path/to/qwen3-asr-0.6b \
-  --tts-model=path/to/qwen3-tts-0.6b \
+  --tts-model=path/to/qwen3-tts-12hz-0.6b-base \
   --port=8090 --threads=4 --verbose
 ```
 
@@ -122,7 +122,7 @@ Key TTS source files:
 | Method | Path | Handler |
 |--------|------|---------|
 | POST | `/v1/audio/transcriptions` | `handler_asr.c` — multipart/form-data |
-| POST | `/v1/audio/speech` | `handler_tts.c` — JSON body (`input`, `voice`, `speed`, `seed`). `seed` forces single-threaded inference for determinism. |
+| POST | `/v1/audio/speech` | `handler_tts.c` — JSON body (`input`, `voice`, `language`, `temperature`, `top_k`, `speed`, `seed`). `seed` forces single-threaded inference for determinism. |
 | GET | `/v1/models` | `handler_asr.c` |
 | GET | `/health` | `handler_asr.c` |
 

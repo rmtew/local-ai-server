@@ -10,7 +10,7 @@ import struct, json, os, sys
 
 os.chdir(r"C:\Data\R\git\claude-repos\local-ai-server")
 
-ONNX_MODEL = r"C:\Data\R\git\claude-repos\deps\models\tts\qwen3-tts-0.6b\tokenizer12hz_decode.onnx"
+ONNX_MODEL = r"C:\Data\R\git\claude-repos\deps\models\tts\qwen3-tts-12hz-0.6b-base\tokenizer12hz_decode.onnx"
 SAFETENSORS = r"C:\Data\R\git\claude-repos\deps\models\tts\Qwen3-TTS-Tokenizer-12Hz\model.safetensors"
 
 # Load codes from the C debug output (parse the printed codes)
