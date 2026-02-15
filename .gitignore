@@ -10,3 +10,5 @@ bin/
 *.wav
 !tts_samples/*.wav
 *.pcm
+__pycache__/
+*.pyc

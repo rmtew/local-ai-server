@@ -1,9 +1,8 @@
 /*
  * tts_ort.c - ONNX Runtime initialization for Qwen3-TTS
  *
- * The full TTS pipeline (talker, code predictor, vocoder) is now native C.
- * ONNX Runtime is kept for potential future use (e.g. speaker_encoder
- * for voice cloning).
+ * The full TTS pipeline (talker, code predictor, vocoder, speaker encoder)
+ * is now native C. ONNX Runtime is kept only for legacy compatibility.
  */
 
 #define _CRT_SECURE_NO_WARNINGS
@@ -98,7 +97,7 @@ int tts_ort_init(TtsOrt *ort, const char *model_dir, int verbose) {
     status = ort->api->CreateCpuMemoryInfo(OrtArenaAllocator, OrtMemTypeDefault, &ort->mem_info);
     ORT_CHECK(ort->api, status);
 
-    /* Speaker encoder (optional, for future voice cloning) */
+    /* Speaker encoder ONNX (unused, native C implementation in tts_speaker_enc.c) */
     if (load_session(ort, model_dir, "speaker_encoder.onnx", &ort->speaker_encoder, 0) != 0) return -1;
 
     return 0;
