@@ -190,9 +190,9 @@ int tts_speaker_enc_init(tts_speaker_enc_ctx_t *ctx,
 
         /* Res2Net conv groups (7 convolutions for groups 1-7) */
         for (int g = 0; g < 7; g++) {
-            snprintf(name, sizeof(name), "speaker_encoder.blocks.%d.res2net_convs.%d.conv.weight", bi, g);
+            snprintf(name, sizeof(name), "speaker_encoder.blocks.%d.res2net_block.blocks.%d.conv.weight", bi, g);
             blk->res_weight[g] = load_f32(ms, name);
-            snprintf(name, sizeof(name), "speaker_encoder.blocks.%d.res2net_convs.%d.conv.bias", bi, g);
+            snprintf(name, sizeof(name), "speaker_encoder.blocks.%d.res2net_block.blocks.%d.conv.bias", bi, g);
             blk->res_bias[g] = load_f32(ms, name);
             if (!blk->res_weight[g] || !blk->res_bias[g]) {
                 fprintf(stderr, "TTS speaker encoder: failed to load res2net conv %d in block %d\n", g, bi);
@@ -207,13 +207,13 @@ int tts_speaker_enc_init(tts_speaker_enc_ctx_t *ctx,
         blk->tdnn2_bias = load_f32(ms, name);
 
         /* SE */
-        snprintf(name, sizeof(name), "speaker_encoder.blocks.%d.se.conv1.weight", bi);
+        snprintf(name, sizeof(name), "speaker_encoder.blocks.%d.se_block.conv1.weight", bi);
         blk->se_fc1_weight = load_f32(ms, name);
-        snprintf(name, sizeof(name), "speaker_encoder.blocks.%d.se.conv1.bias", bi);
+        snprintf(name, sizeof(name), "speaker_encoder.blocks.%d.se_block.conv1.bias", bi);
         blk->se_fc1_bias = load_f32(ms, name);
-        snprintf(name, sizeof(name), "speaker_encoder.blocks.%d.se.conv2.weight", bi);
+        snprintf(name, sizeof(name), "speaker_encoder.blocks.%d.se_block.conv2.weight", bi);
         blk->se_fc2_weight = load_f32(ms, name);
-        snprintf(name, sizeof(name), "speaker_encoder.blocks.%d.se.conv2.bias", bi);
+        snprintf(name, sizeof(name), "speaker_encoder.blocks.%d.se_block.conv2.bias", bi);
         blk->se_fc2_bias = load_f32(ms, name);
 
         if (!blk->tdnn1_weight || !blk->tdnn2_weight ||
@@ -224,26 +224,26 @@ int tts_speaker_enc_init(tts_speaker_enc_ctx_t *ctx,
     }
 
     /* MFA: Conv1d(1536->1536, k=1) */
-    ctx->mfa_weight = load_f32(ms, "speaker_encoder.mfa_conv.conv.weight");
-    ctx->mfa_bias = load_f32(ms, "speaker_encoder.mfa_conv.conv.bias");
+    ctx->mfa_weight = load_f32(ms, "speaker_encoder.mfa.conv.weight");
+    ctx->mfa_bias = load_f32(ms, "speaker_encoder.mfa.conv.bias");
     if (!ctx->mfa_weight || !ctx->mfa_bias) {
         fprintf(stderr, "TTS speaker encoder: failed to load MFA\n");
         goto fail;
     }
 
     /* ASP */
-    ctx->asp_conv1_weight = load_f32(ms, "speaker_encoder.asp_conv1.conv.weight");
-    ctx->asp_conv1_bias = load_f32(ms, "speaker_encoder.asp_conv1.conv.bias");
-    ctx->asp_conv2_weight = load_f32(ms, "speaker_encoder.asp_conv2.conv.weight");
-    ctx->asp_conv2_bias = load_f32(ms, "speaker_encoder.asp_conv2.conv.bias");
+    ctx->asp_conv1_weight = load_f32(ms, "speaker_encoder.asp.tdnn.conv.weight");
+    ctx->asp_conv1_bias = load_f32(ms, "speaker_encoder.asp.tdnn.conv.bias");
+    ctx->asp_conv2_weight = load_f32(ms, "speaker_encoder.asp.conv.weight");
+    ctx->asp_conv2_bias = load_f32(ms, "speaker_encoder.asp.conv.bias");
     if (!ctx->asp_conv1_weight || !ctx->asp_conv2_weight) {
         fprintf(stderr, "TTS speaker encoder: failed to load ASP\n");
         goto fail;
     }
 
     /* FC */
-    ctx->fc_weight = load_f32(ms, "speaker_encoder.asp_bn.conv.weight");
-    ctx->fc_bias = load_f32(ms, "speaker_encoder.asp_bn.conv.bias");
+    ctx->fc_weight = load_f32(ms, "speaker_encoder.fc.weight");
+    ctx->fc_bias = load_f32(ms, "speaker_encoder.fc.bias");
     if (!ctx->fc_weight || !ctx->fc_bias) {
         fprintf(stderr, "TTS speaker encoder: failed to load FC\n");
         goto fail;
