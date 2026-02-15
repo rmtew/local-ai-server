@@ -8,6 +8,7 @@
 #include "handler_asr.h"
 #include "json_reader.h"
 #include "json.h"
+#include "qwen_asr_kernels.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -50,6 +51,7 @@ void handle_tts_speech(SOCKET client, const HttpRequest *request,
     char voice[64] = {0};
     char response_format[32] = {0};
     double speed = 1.0;
+    double seed = -1.0;
 
     int input_len = jr_get_string((const char *)request->body, request->body_len,
                                    "input", input_text, sizeof(input_text));
@@ -59,6 +61,8 @@ void handle_tts_speech(SOCKET client, const HttpRequest *request,
                    "response_format", response_format, sizeof(response_format));
     jr_get_double((const char *)request->body, request->body_len,
                    "speed", &speed);
+    jr_get_double((const char *)request->body, request->body_len,
+                   "seed", &seed);
 
     if (input_len <= 0 || input_text[0] == '\0') {
         http_send_json_error(client, 400,
@@ -77,11 +81,21 @@ void handle_tts_speech(SOCKET client, const HttpRequest *request,
     }
 
     if (ctx->verbose) {
-        printf("  TTS request: input=\"%.60s%s\", voice=%s, speed=%.1f\n",
+        printf("  TTS request: input=\"%.60s%s\", voice=%s, speed=%.1f, seed=%d\n",
                input_text,
                strlen(input_text) > 60 ? "..." : "",
                voice[0] ? voice : "default",
-               speed);
+               speed,
+               seed >= 0.0 ? (int)seed : -1);
+    }
+
+    /* Seed RNG and force single-threaded for deterministic output.
+     * Multi-threaded GEMM has non-deterministic FP accumulation order. */
+    int saved_threads = 0;
+    if (seed >= 0.0) {
+        srand((unsigned int)seed);
+        saved_threads = ctx->threads;
+        qwen_set_threads(1);
     }
 
     /* Run synthesis */
@@ -91,6 +105,10 @@ void handle_tts_speech(SOCKET client, const HttpRequest *request,
                                       50,      /* top_k */
                                       (float)speed,
                                       &result);
+
+    if (saved_threads > 0) {
+        qwen_set_threads(saved_threads);
+    }
     if (rc != 0) {
         http_send_json_error(client, 500,
             "Speech synthesis failed",

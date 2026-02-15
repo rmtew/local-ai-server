@@ -8,4 +8,5 @@ bin/
 *.lib
 *.raw
 *.wav
+!tts_samples/*.wav
 *.pcm

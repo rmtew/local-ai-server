@@ -223,6 +223,7 @@ int main(int argc, char **argv) {
     memset(&handler_ctx, 0, sizeof(handler_ctx));
     handler_ctx.asr_ctx = asr_ctx;
     handler_ctx.verbose = verbose;
+    handler_ctx.threads = threads;
 #ifdef USE_ORT
     handler_ctx.tts = tts_pipeline;
 #endif

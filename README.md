@@ -141,6 +141,7 @@ Synthesize speech. JSON body, returns WAV audio.
 - `input` (required) -- Text to synthesize
 - `voice` -- Voice name (currently accepted but not used for voice selection)
 - `speed` -- Playback speed multiplier (0.25 to 4.0, default 1.0)
+- `seed` -- Integer seed for deterministic output (forces single-threaded inference; omit for default behavior)
 - `response_format` -- `"wav"` (default)
 
 **Response:** WAV audio (16-bit PCM, 24 kHz mono)

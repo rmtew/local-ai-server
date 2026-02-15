@@ -17,6 +17,7 @@
 typedef struct HandlerContext {
     qwen_ctx_t *asr_ctx;   /* NULL if ASR not loaded */
     int verbose;
+    int threads;           /* Thread count for inference */
 #ifdef USE_ORT
     TtsPipeline *tts;      /* NULL if TTS not loaded */
 #endif

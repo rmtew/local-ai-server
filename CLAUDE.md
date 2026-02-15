@@ -17,9 +17,11 @@ Requires MSVC (Visual Studio C++ workload). Set `DEPS_ROOT` environment variable
 
 ```bash
 git submodule update --init
-build.bat           # auto-detects OpenBLAS, CUDA, ONNX Runtime
-build.bat bench     # vocoder benchmark
+C:/Data/R/git/claude-repos/local-ai-server/build.bat           # auto-detects OpenBLAS, CUDA, ONNX Runtime
+C:/Data/R/git/claude-repos/local-ai-server/build.bat bench     # vocoder benchmark
 ```
+
+**Invoking `.bat` from Claude Code (git bash):** Use the full absolute path with forward slashes (e.g. `C:/Data/R/git/claude-repos/local-ai-server/build.bat`). Git bash delegates `.bat` files to the Windows command processor automatically. Do NOT wrap in `cmd.exe /c` or `cmd //c` — this causes quoting and environment problems.
 
 **Output:** `bin/local-ai-server.exe`
 
@@ -73,11 +75,25 @@ curl http://localhost:8090/health
 # ASR test
 curl -X POST http://localhost:8090/v1/audio/transcriptions -F "file=@test.wav"
 
-# TTS test
+# TTS test (deterministic with seed)
 curl -X POST http://localhost:8090/v1/audio/speech \
   -H "Content-Type: application/json" \
-  -d '{"input":"Hello world","voice":"alloy"}'
+  -d '{"input":"Hello world","voice":"alloy","seed":42}'
 ```
+
+### TTS Regression (`tts_regression.py`)
+
+Automated regression harness comparing TTS output against reference WAVs using Pearson correlation and SNR metrics. Requires `seed` parameter for deterministic sampling.
+
+```bash
+python tts_regression.py --generate-missing   # First-time: generate reference WAVs
+python tts_regression.py                       # Run regression checks
+python tts_regression.py --sanity-only         # Non-silence + duration checks only
+python tts_regression.py --refresh-refs        # Regenerate all references
+python tts_regression.py --case short_hello    # Run specific case
+```
+
+Reference WAVs stored in `tts_samples/` (tracked in git).
 
 Python verification scripts in `tools/` compare native C output against ONNX reference implementations. The `qwen-asr` submodule has its own regression suite (`asr_regression.py`).
 
@@ -106,7 +122,7 @@ Key TTS source files:
 | Method | Path | Handler |
 |--------|------|---------|
 | POST | `/v1/audio/transcriptions` | `handler_asr.c` — multipart/form-data |
-| POST | `/v1/audio/speech` | `handler_tts.c` — JSON body |
+| POST | `/v1/audio/speech` | `handler_tts.c` — JSON body (`input`, `voice`, `speed`, `seed`). `seed` forces single-threaded inference for determinism. |
 | GET | `/v1/models` | `handler_asr.c` |
 | GET | `/health` | `handler_asr.c` |
 
