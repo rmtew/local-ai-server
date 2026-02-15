@@ -14,8 +14,12 @@
 #include <stdlib.h>
 #include <string.h>
 
+#ifdef _WIN32
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
+#else
+#include <signal.h>
+#endif
 
 #include "http.h"
 #include "handler_asr.h"
@@ -32,6 +36,7 @@ static HttpServer g_server;
 /* Shutdown flag checked by long-running operations (e.g. TTS decode loop) */
 volatile int g_shutdown = 0;
 
+#ifdef _WIN32
 static BOOL WINAPI ctrl_handler(DWORD type) {
     (void)type;
     printf("\nShutting down...\n");
@@ -39,6 +44,14 @@ static BOOL WINAPI ctrl_handler(DWORD type) {
     http_server_shutdown(&g_server);
     return TRUE;
 }
+#else
+static void signal_handler(int sig) {
+    (void)sig;
+    printf("\nShutting down...\n");
+    g_shutdown = 1;
+    http_server_shutdown(&g_server);
+}
+#endif
 
 static void print_usage(const char *prog) {
     printf("Usage: %s [--model=<dir>] [--tts-model=<dir>] [options]\n\n", prog);
@@ -70,7 +83,9 @@ static const char *parse_arg(const char *arg, const char *key) {
 }
 
 int main(int argc, char **argv) {
+#ifdef _WIN32
     SetConsoleOutputCP(CP_UTF8);
+#endif
     setvbuf(stdout, NULL, _IONBF, 0);
     setvbuf(stderr, NULL, _IONBF, 0);
 
@@ -174,7 +189,12 @@ int main(int argc, char **argv) {
     }
 
     /* Register Ctrl+C handler */
+#ifdef _WIN32
     SetConsoleCtrlHandler(ctrl_handler, TRUE);
+#else
+    signal(SIGINT, signal_handler);
+    signal(SIGTERM, signal_handler);
+#endif
 
     /* Print banner */
     printf("\n");

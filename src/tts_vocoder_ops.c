@@ -231,7 +231,9 @@ void voc_conv_transpose1d(float *out, const float *in,
  * ======================================================================== */
 
 /* ---- AVX2 fast sin approximation for SnakeBeta ---- */
+#if defined(__AVX2__) || (defined(_MSC_VER) && defined(__AVX2__)) || defined(_M_X64)
 #include <immintrin.h>
+#define VOC_HAS_AVX2 1
 
 /*
  * Fast sin(x) using AVX2 with Cephes-style range reduction.
@@ -272,25 +274,27 @@ static inline __m256 fast_sin_avx2(__m256 x) {
     result = _mm256_xor_ps(result, _mm256_castsi256_ps(sign_mask));
     return result;
 }
+#endif /* AVX2 */
 
 void voc_snake_beta(float *x, const float *exp_alpha, const float *inv_exp_beta,
                     int channels, int T) {
     /* x += inv_exp_beta * sin^2(exp_alpha * x) */
-    int T8 = T & ~7;
-
     for (int ch = 0; ch < channels; ch++) {
+        float *row = x + (size_t)ch * T;
+        int t = 0;
+
+#ifdef VOC_HAS_AVX2
         __m256 ea = _mm256_set1_ps(exp_alpha[ch]);
         __m256 ieb = _mm256_set1_ps(inv_exp_beta[ch]);
-        float *row = x + (size_t)ch * T;
-
-        int t = 0;
+        int T8 = T & ~7;
         for (; t < T8; t += 8) {
             __m256 v = _mm256_loadu_ps(row + t);
             __m256 s = fast_sin_avx2(_mm256_mul_ps(ea, v));
             __m256 s2 = _mm256_mul_ps(s, s);
             _mm256_storeu_ps(row + t, _mm256_fmadd_ps(ieb, s2, v));
         }
-        /* Scalar tail */
+#endif
+        /* Scalar tail (or full loop on non-AVX2 platforms) */
         float ea_s = exp_alpha[ch];
         float ieb_s = inv_exp_beta[ch];
         for (; t < T; t++) {

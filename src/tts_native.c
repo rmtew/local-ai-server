@@ -20,8 +20,7 @@
 #include <string.h>
 #include <math.h>
 
-#define WIN32_LEAN_AND_MEAN
-#include <windows.h>
+#include "platform.h"
 
 /* From tts_sampling.c */
 extern void tts_apply_repetition_penalty(float *logits, int vocab_size,
@@ -1167,9 +1166,7 @@ int tts_native_init(tts_native_ctx_t *ctx, const char *model_dir,
     (void)gpu_ctx;
 #endif
 
-    LARGE_INTEGER freq, t_start, t_end;
-    QueryPerformanceFrequency(&freq);
-    QueryPerformanceCounter(&t_start);
+    double t_start = platform_time_ms();
 
     if (verbose) printf("TTS native: loading model from %s\n", model_dir);
 
@@ -1224,8 +1221,7 @@ int tts_native_init(tts_native_ctx_t *ctx, const char *model_dir,
     }
 #endif
 
-    QueryPerformanceCounter(&t_end);
-    double load_ms = (double)(t_end.QuadPart - t_start.QuadPart) * 1000.0 / (double)freq.QuadPart;
+    double load_ms = platform_time_ms() - t_start;
     if (verbose) printf("TTS native: model loaded in %.0f ms\n", load_ms);
 
     return 0;
@@ -1307,9 +1303,7 @@ int tts_native_decode(tts_native_ctx_t *ctx, const char *text,
     *codes_out = NULL;
     *n_steps_out = 0;
 
-    LARGE_INTEGER freq, t_start;
-    QueryPerformanceFrequency(&freq);
-    QueryPerformanceCounter(&t_start);
+    double t_start = platform_time_ms();
 
     if (ctx->verbose) printf("TTS native decode: \"%s\"\n", text);
 
@@ -1355,9 +1349,7 @@ int tts_native_decode(tts_native_ctx_t *ctx, const char *text,
         return -1;
     }
 
-    LARGE_INTEGER t_end;
-    QueryPerformanceCounter(&t_end);
-    double elapsed_ms = (double)(t_end.QuadPart - t_start.QuadPart) * 1000.0 / (double)freq.QuadPart;
+    double elapsed_ms = platform_time_ms() - t_start;
 
     if (ctx->verbose)
         printf("  TTS native: %d steps (%.1fs audio) in %.0f ms\n",

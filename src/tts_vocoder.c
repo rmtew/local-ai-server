@@ -21,8 +21,7 @@
 #include <cblas.h>
 #endif
 
-#define WIN32_LEAN_AND_MEAN
-#include <windows.h>
+#include "platform.h"
 
 /* ========================================================================
  * Helpers
@@ -593,10 +592,8 @@ float *tts_vocoder_run(tts_vocoder_ctx_t *ctx, const int64_t *codes,
     *out_n_samples = 0;
     int T = n_steps;
 
-    LARGE_INTEGER freq, t_start, t_prev, t_now;
-    QueryPerformanceFrequency(&freq);
-    QueryPerformanceCounter(&t_start);
-    t_prev = t_start;
+    double t_start = platform_time_ms();
+    double t_prev = t_start, t_now;
 
     if (timing) memset(timing, 0, sizeof(*timing));
 
@@ -612,12 +609,12 @@ float *tts_vocoder_run(tts_vocoder_ctx_t *ctx, const int64_t *codes,
 
     rvq_decode(ctx, codes, T, cur);
 
-    QueryPerformanceCounter(&t_now);
+    t_now = platform_time_ms();
     if (timing) {
-        timing->rvq_ms = (double)(t_now.QuadPart - t_prev.QuadPart) * 1000.0 / (double)freq.QuadPart;
+        timing->rvq_ms = t_now - t_prev;
     }
     if (ctx->verbose) {
-        double ms = (double)(t_now.QuadPart - t_start.QuadPart) * 1000.0 / (double)freq.QuadPart;
+        double ms = t_now - t_start;
         printf("    RVQ decode: [512, %d] (%.0f ms)\n", T, ms);
         fflush(stdout);
     }
@@ -631,12 +628,12 @@ float *tts_vocoder_run(tts_vocoder_ctx_t *ctx, const int64_t *codes,
                        VOC_PRE_CONV_KERNEL, 1, 1, scratch);
     cur = next;
 
-    QueryPerformanceCounter(&t_now);
+    t_now = platform_time_ms();
     if (timing) {
-        timing->preconv_ms = (double)(t_now.QuadPart - t_prev.QuadPart) * 1000.0 / (double)freq.QuadPart;
+        timing->preconv_ms = t_now - t_prev;
     }
     if (ctx->verbose) {
-        double ms = (double)(t_now.QuadPart - t_start.QuadPart) * 1000.0 / (double)freq.QuadPart;
+        double ms = t_now - t_start;
         printf("    pre_conv: [1024, %d] (%.0f ms)\n", T, ms);
         fflush(stdout);
     }
@@ -647,12 +644,12 @@ float *tts_vocoder_run(tts_vocoder_ctx_t *ctx, const int64_t *codes,
     voc_pre_transformer(ctx, next, cur, T);
     cur = next;
 
-    QueryPerformanceCounter(&t_now);
+    t_now = platform_time_ms();
     if (timing) {
-        timing->xfmr_ms = (double)(t_now.QuadPart - t_prev.QuadPart) * 1000.0 / (double)freq.QuadPart;
+        timing->xfmr_ms = t_now - t_prev;
     }
     if (ctx->verbose) {
-        double ms = (double)(t_now.QuadPart - t_start.QuadPart) * 1000.0 / (double)freq.QuadPart;
+        double ms = t_now - t_start;
         printf("    pre_transformer: [1024, %d] (%.0f ms)\n", T, ms);
         fflush(stdout);
     }
@@ -672,9 +669,9 @@ float *tts_vocoder_run(tts_vocoder_ctx_t *ctx, const int64_t *codes,
 
         run_convnext(ctx, cur, VOC_UPSAMPLE_CHANNELS, T, &us->convnext, scratch);
 
-        QueryPerformanceCounter(&t_now);
+        t_now = platform_time_ms();
         if (timing) {
-            timing->upsample_ms[s] = (double)(t_now.QuadPart - t_prev.QuadPart) * 1000.0 / (double)freq.QuadPart;
+            timing->upsample_ms[s] = t_now - t_prev;
         }
         if (ctx->verbose) {
             printf("    upsample%d: [1024, %d]\n", s, T);
@@ -684,7 +681,7 @@ float *tts_vocoder_run(tts_vocoder_ctx_t *ctx, const int64_t *codes,
     }
 
     if (ctx->verbose) {
-        double ms = (double)(t_now.QuadPart - t_start.QuadPart) * 1000.0 / (double)freq.QuadPart;
+        double ms = t_now - t_start;
         printf("    upsample: [1024, %d] (%.0f ms)\n", T, ms);
         fflush(stdout);
     }
@@ -697,9 +694,9 @@ float *tts_vocoder_run(tts_vocoder_ctx_t *ctx, const int64_t *codes,
                            1024, VOC_BIGVGAN_INIT_CH, T, 7, 1, 1, scratch);
         cur = next;
 
-        QueryPerformanceCounter(&t_now);
+        t_now = platform_time_ms();
         if (timing) {
-            timing->bigvgan_init_ms = (double)(t_now.QuadPart - t_prev.QuadPart) * 1000.0 / (double)freq.QuadPart;
+            timing->bigvgan_init_ms = t_now - t_prev;
         }
         if (ctx->verbose) {
             printf("    bigvgan_init: [1536, %d]\n", T);
@@ -724,21 +721,20 @@ float *tts_vocoder_run(tts_vocoder_ctx_t *ctx, const int64_t *codes,
         T = T_out;
         cur = next;
 
-        LARGE_INTEGER t_mid;
-        QueryPerformanceCounter(&t_mid);
+        double t_mid = platform_time_ms();
 
         for (int r = 0; r < VOC_BIGVGAN_RESUNITS; r++) {
             run_resunit(cur, &blk->resunits[r], blk->out_ch, T, scratch);
         }
 
-        QueryPerformanceCounter(&t_now);
+        t_now = platform_time_ms();
         if (timing) {
-            timing->bigvgan_block_ms[b] = (double)(t_now.QuadPart - t_prev.QuadPart) * 1000.0 / (double)freq.QuadPart;
-            timing->bigvgan_tconv_ms[b] = (double)(t_mid.QuadPart - t_prev.QuadPart) * 1000.0 / (double)freq.QuadPart;
-            timing->bigvgan_res_ms[b] = (double)(t_now.QuadPart - t_mid.QuadPart) * 1000.0 / (double)freq.QuadPart;
+            timing->bigvgan_block_ms[b] = t_now - t_prev;
+            timing->bigvgan_tconv_ms[b] = t_mid - t_prev;
+            timing->bigvgan_res_ms[b] = t_now - t_mid;
         }
         if (ctx->verbose) {
-            double ms = (double)(t_now.QuadPart - t_start.QuadPart) * 1000.0 / (double)freq.QuadPart;
+            double ms = t_now - t_start;
             printf("    bigvgan block %d: [%d, %d] (%.0f ms)\n", b, blk->out_ch, T, ms);
             fflush(stdout);
         }
@@ -758,13 +754,13 @@ float *tts_vocoder_run(tts_vocoder_ctx_t *ctx, const int64_t *codes,
         if (next[i] < -1.0f) next[i] = -1.0f;
     }
 
-    QueryPerformanceCounter(&t_now);
+    t_now = platform_time_ms();
     if (timing) {
-        timing->final_ms = (double)(t_now.QuadPart - t_prev.QuadPart) * 1000.0 / (double)freq.QuadPart;
-        timing->total_ms = (double)(t_now.QuadPart - t_start.QuadPart) * 1000.0 / (double)freq.QuadPart;
+        timing->final_ms = t_now - t_prev;
+        timing->total_ms = t_now - t_start;
     }
     if (ctx->verbose) {
-        double ms = (double)(t_now.QuadPart - t_start.QuadPart) * 1000.0 / (double)freq.QuadPart;
+        double ms = t_now - t_start;
         printf("    final: %d samples (%.0f ms total)\n", T, ms);
         fflush(stdout);
     }
@@ -787,9 +783,7 @@ int tts_vocoder_init(tts_vocoder_ctx_t *ctx, const char *tokenizer12hz_dir,
     memset(ctx, 0, sizeof(*ctx));
     ctx->verbose = verbose;
 
-    LARGE_INTEGER freq, t_start, t_end;
-    QueryPerformanceFrequency(&freq);
-    QueryPerformanceCounter(&t_start);
+    double t_start = platform_time_ms();
 
     if (verbose) printf("vocoder: loading weights from %s\n", tokenizer12hz_dir);
 
@@ -814,8 +808,7 @@ int tts_vocoder_init(tts_vocoder_ctx_t *ctx, const char *tokenizer12hz_dir,
     if (load_bigvgan_weights(ctx) != 0) goto fail;
     if (verbose) printf("vocoder: BigVGAN loaded (4 blocks)\n");
 
-    QueryPerformanceCounter(&t_end);
-    double ms = (double)(t_end.QuadPart - t_start.QuadPart) * 1000.0 / (double)freq.QuadPart;
+    double ms = platform_time_ms() - t_start;
     if (verbose) printf("vocoder: all weights loaded in %.0f ms\n", ms);
 
     return 0;

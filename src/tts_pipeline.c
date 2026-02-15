@@ -19,8 +19,7 @@
 #include <string.h>
 #include <math.h>
 
-#define WIN32_LEAN_AND_MEAN
-#include <windows.h>
+#include "platform.h"
 
 #ifdef USE_CUBLAS
 #include "qwen_asr_gpu.h"
@@ -205,9 +204,7 @@ int tts_pipeline_synthesize(TtsPipeline *tts, const char *text,
     if (speed < 0.25f) speed = 0.25f;
     if (speed > 4.0f) speed = 4.0f;
 
-    LARGE_INTEGER freq, t_start, t_end;
-    QueryPerformanceFrequency(&freq);
-    QueryPerformanceCounter(&t_start);
+    double t_start = platform_time_ms();
 
     if (tts->verbose) {
         printf("TTS synthesize: \"%s\"\n", text);
@@ -230,9 +227,8 @@ int tts_pipeline_synthesize(TtsPipeline *tts, const char *text,
     }
 
     /* 4. Vocoder decode: codes -> audio */
-    LARGE_INTEGER t_voc_start;
-    QueryPerformanceCounter(&t_voc_start);
-    double decode_ms = (double)(t_voc_start.QuadPart - t_start.QuadPart) * 1000.0 / (double)freq.QuadPart;
+    double t_voc_start = platform_time_ms();
+    double decode_ms = t_voc_start - t_start;
     if (tts->verbose) {
         printf("  vocoder: starting (%d steps, %d code groups)... [decode took %.0f ms]\n",
                n_steps, NUM_CODE_GROUPS, decode_ms);
@@ -243,9 +239,7 @@ int tts_pipeline_synthesize(TtsPipeline *tts, const char *text,
     free(codes);
 
     if (tts->verbose) {
-        LARGE_INTEGER t_voc_end;
-        QueryPerformanceCounter(&t_voc_end);
-        double voc_ms = (double)(t_voc_end.QuadPart - t_voc_start.QuadPart) * 1000.0 / (double)freq.QuadPart;
+        double voc_ms = platform_time_ms() - t_voc_start;
         printf("  vocoder: took %.0f ms\n", voc_ms);
     }
 
@@ -270,8 +264,7 @@ int tts_pipeline_synthesize(TtsPipeline *tts, const char *text,
         return -1;
     }
 
-    QueryPerformanceCounter(&t_end);
-    double elapsed_ms = (double)(t_end.QuadPart - t_start.QuadPart) * 1000.0 / (double)freq.QuadPart;
+    double elapsed_ms = platform_time_ms() - t_start;
 
     result->wav_data = wav;
     result->wav_len = wav_len;

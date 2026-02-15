@@ -4,6 +4,9 @@
  */
 
 #define _CRT_SECURE_NO_WARNINGS
+#ifdef _MSC_VER
+#define strdup _strdup
+#endif
 #include "handler_asr.h"
 #include "handler_tts.h"
 #include "multipart.h"
@@ -185,7 +188,7 @@ static void handle_transcription(SOCKET client, const HttpRequest *request,
     if (language[0]) {
         /* Save previous language setting */
         if (ctx->asr_ctx->force_language) {
-            prev_language = _strdup(ctx->asr_ctx->force_language);
+            prev_language = strdup(ctx->asr_ctx->force_language);
         }
         if (qwen_set_force_language(ctx->asr_ctx, language) != 0) {
             http_send_json_error(client, 400,

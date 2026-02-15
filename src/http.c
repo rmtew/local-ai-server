@@ -1,18 +1,26 @@
 /*
  * HTTP Layer
- * Winsock2-based HTTP server implementation.
+ * HTTP server implementation: Winsock2 on Windows, POSIX sockets on Linux.
  */
 
 #define _CRT_SECURE_NO_WARNINGS
 #include "http.h"
 #include "json.h"
 
+#ifdef _WIN32
 #include <ws2tcpip.h>
+#pragma comment(lib, "ws2_32.lib")
+#define SOCK_ERRNO WSAGetLastError()
+#else
+#include <strings.h>
+#define SOCK_ERRNO errno
+#define _strnicmp strncasecmp
+#define _atoi64(s) strtoll((s), NULL, 10)
+#endif
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-
-#pragma comment(lib, "ws2_32.lib")
 
 #define HEADER_BUF_SIZE  (16 * 1024)
 #define MAX_BODY_SIZE    (100 * 1024 * 1024)  /* 100 MB */
@@ -80,16 +88,20 @@ static int parse_request_line(const char *buf, HttpRequest *req) {
 }
 
 int http_server_init(HttpServer *srv, int port) {
+#ifdef _WIN32
     WSADATA wsa;
     if (WSAStartup(MAKEWORD(2, 2), &wsa) != 0) {
         fprintf(stderr, "WSAStartup failed: %d\n", WSAGetLastError());
         return -1;
     }
+#endif
 
     srv->listen_sock = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
     if (srv->listen_sock == INVALID_SOCKET) {
-        fprintf(stderr, "socket() failed: %d\n", WSAGetLastError());
+        fprintf(stderr, "socket() failed: %d\n", SOCK_ERRNO);
+#ifdef _WIN32
         WSACleanup();
+#endif
         return -1;
     }
 
@@ -102,19 +114,23 @@ int http_server_init(HttpServer *srv, int port) {
     memset(&addr, 0, sizeof(addr));
     addr.sin_family = AF_INET;
     addr.sin_addr.s_addr = INADDR_ANY;
-    addr.sin_port = htons((u_short)port);
+    addr.sin_port = htons((uint16_t)port);
 
     if (bind(srv->listen_sock, (struct sockaddr *)&addr, sizeof(addr)) == SOCKET_ERROR) {
-        fprintf(stderr, "bind() failed on port %d: %d\n", port, WSAGetLastError());
+        fprintf(stderr, "bind() failed on port %d: %d\n", port, SOCK_ERRNO);
         closesocket(srv->listen_sock);
+#ifdef _WIN32
         WSACleanup();
+#endif
         return -1;
     }
 
     if (listen(srv->listen_sock, 1) == SOCKET_ERROR) {
-        fprintf(stderr, "listen() failed: %d\n", WSAGetLastError());
+        fprintf(stderr, "listen() failed: %d\n", SOCK_ERRNO);
         closesocket(srv->listen_sock);
+#ifdef _WIN32
         WSACleanup();
+#endif
         return -1;
     }
 
@@ -126,11 +142,11 @@ int http_server_init(HttpServer *srv, int port) {
 void http_server_run(HttpServer *srv, http_handler_fn handler, void *user_data) {
     while (srv->running) {
         struct sockaddr_in client_addr;
-        int addr_len = sizeof(client_addr);
+        socklen_t addr_len = sizeof(client_addr);
         SOCKET client = accept(srv->listen_sock, (struct sockaddr *)&client_addr, &addr_len);
         if (client == INVALID_SOCKET) {
             if (!srv->running) break;
-            fprintf(stderr, "accept() failed: %d\n", WSAGetLastError());
+            fprintf(stderr, "accept() failed: %d\n", SOCK_ERRNO);
             continue;
         }
 
@@ -300,11 +316,13 @@ void http_server_shutdown(HttpServer *srv) {
         memset(&addr, 0, sizeof(addr));
         addr.sin_family = AF_INET;
         addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-        addr.sin_port = htons((u_short)srv->port);
+        addr.sin_port = htons((uint16_t)srv->port);
         connect(wake, (struct sockaddr *)&addr, sizeof(addr));
         closesocket(wake);
     }
 
     closesocket(srv->listen_sock);
+#ifdef _WIN32
     WSACleanup();
+#endif
 }

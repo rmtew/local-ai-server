@@ -53,14 +53,17 @@ static int load_session(TtsOrt *ort, const char *model_dir,
         printf("  TTS: loading %s...\n", filename);
     }
 
-    /* Convert to wide string for ORT API (Windows) */
+#ifdef _WIN32
+    /* Convert to wide string for ORT API (Windows requires wchar_t path) */
     wchar_t wpath[512];
     size_t len = strlen(path);
     for (size_t i = 0; i <= len; i++) {
         wpath[i] = (wchar_t)(path[i] == '/' ? '\\' : path[i]);
     }
-
     OrtStatus *status = ort->api->CreateSession(ort->env, wpath, ort->opts, out);
+#else
+    OrtStatus *status = ort->api->CreateSession(ort->env, path, ort->opts, out);
+#endif
     ORT_CHECK(ort->api, status);
 
     return 0;

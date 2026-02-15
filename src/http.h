@@ -1,12 +1,27 @@
 /*
  * HTTP Layer
- * Winsock2-based HTTP server for single-threaded request handling.
+ * Single-threaded HTTP server: Winsock2 on Windows, POSIX sockets on Linux.
  */
 
 #ifndef LOCAL_AI_HTTP_H
 #define LOCAL_AI_HTTP_H
 
+#ifdef _WIN32
 #include <winsock2.h>
+#else
+#include <sys/types.h>
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <netinet/tcp.h>
+#include <arpa/inet.h>
+#include <unistd.h>
+#include <errno.h>
+typedef int SOCKET;
+#define INVALID_SOCKET (-1)
+#define SOCKET_ERROR   (-1)
+#define closesocket    close
+#endif
+
 #include <stddef.h>
 
 /* Parsed HTTP request */

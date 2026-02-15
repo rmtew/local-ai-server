@@ -10,8 +10,6 @@
 #include <string.h>
 #include <float.h>
 
-#ifdef USE_ORT
-
 /* Apply repetition penalty to logits for previously generated tokens.
  * Tokens in history[] get their logits divided (if positive) or
  * multiplied (if negative) by the penalty factor. */
@@ -101,5 +99,3 @@ int tts_sample_topk(float *logits, int vocab_size, float temperature, int top_k)
     free(values);
     return selected;
 }
-
-#endif /* USE_ORT */
