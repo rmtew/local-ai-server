@@ -169,6 +169,10 @@ typedef struct {
     float *buf_b;
     size_t buf_cap;             /* floats per buffer */
 
+    /* Preallocated scratch for conv/resunit/convnext operations */
+    float *scratch;
+    size_t scratch_cap;         /* floats */
+
     /* Transformer scratch */
     float *xfmr_q, *xfmr_k, *xfmr_v;
     float *xfmr_attn_out, *xfmr_proj_out;
@@ -185,6 +189,23 @@ typedef struct {
 } tts_vocoder_ctx_t;
 
 /* ========================================================================
+ * Per-stage timing (optional, for benchmarking)
+ * ======================================================================== */
+
+typedef struct {
+    double rvq_ms;
+    double preconv_ms;
+    double xfmr_ms;
+    double upsample_ms[VOC_UPSAMPLE_STAGES];
+    double bigvgan_init_ms;
+    double bigvgan_block_ms[VOC_BIGVGAN_NUM_BLOCKS];
+    double bigvgan_tconv_ms[VOC_BIGVGAN_NUM_BLOCKS];  /* snake + conv_transpose */
+    double bigvgan_res_ms[VOC_BIGVGAN_NUM_BLOCKS];     /* 3x resunit */
+    double final_ms;
+    double total_ms;
+} voc_timing_t;
+
+/* ========================================================================
  * API
  * ======================================================================== */
 
@@ -198,10 +219,12 @@ int tts_vocoder_init(tts_vocoder_ctx_t *ctx, const char *tokenizer12hz_dir,
 void tts_vocoder_free(tts_vocoder_ctx_t *ctx);
 
 /* Run vocoder: codes [n_steps, 16] int64 -> audio float samples.
+ * If timing is non-NULL, populates per-stage timing data.
  * Returns malloc'd float array, sets *out_n_samples.
  * Caller must free the returned array. */
 float *tts_vocoder_run(tts_vocoder_ctx_t *ctx, const int64_t *codes,
-                       int n_steps, int *out_n_samples);
+                       int n_steps, int *out_n_samples,
+                       voc_timing_t *timing);
 
 /* ========================================================================
  * Internal operations (implemented in tts_vocoder_ops.c)
@@ -217,13 +240,15 @@ void voc_conv1d_causal(float *out, const float *in,
                        int c_in, int c_out, int T, int kernel, int dilation,
                        int groups, float *scratch);
 
-/* Causal ConvTranspose1d: scatter-add then trim.
+/* Causal ConvTranspose1d: GEMM + col2im (with BLAS) or scatter-add (without).
  * in: [channels_in, T], out: [channels_out, T*stride]
  * weight: [channels_in, channels_out, kernel]
- * kernel = 2*stride for BigVGAN blocks, kernel = stride for upsample stages. */
+ * kernel = 2*stride for BigVGAN blocks, kernel = stride for upsample stages.
+ * scratch must hold at least c_out * kernel * T floats (GEMM cols buffer). */
 void voc_conv_transpose1d(float *out, const float *in,
                           const float *weight, const float *bias,
-                          int c_in, int c_out, int T, int kernel, int stride);
+                          int c_in, int c_out, int T, int kernel, int stride,
+                          float *scratch);
 
 /* SnakeBeta activation: x + (1/exp(beta)) * sin^2(exp(alpha) * x)
  * In-place on x [channels, T]. alpha, beta: [channels] (pre-exponentiated at load). */

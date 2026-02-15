@@ -323,15 +323,102 @@ static int load_bigvgan_weights(tts_vocoder_ctx_t *ctx) {
 static void ensure_buffers(tts_vocoder_ctx_t *ctx, int T) {
     /* Peak: BigVGAN block 3 output [96, 1920T] = 184320*T floats per buffer. */
     size_t needed = (size_t)184320 * T;
-    if (needed <= ctx->buf_cap) return;
+    if (needed > ctx->buf_cap) {
+        free(ctx->buf_a);
+        free(ctx->buf_b);
+        ctx->buf_a = (float *)malloc(needed * sizeof(float));
+        ctx->buf_b = (float *)malloc(needed * sizeof(float));
+        ctx->buf_cap = needed;
+        if (!ctx->buf_a || !ctx->buf_b) {
+            fprintf(stderr, "vocoder: failed to allocate buffers (%zu floats)\n", needed);
+        }
+    }
 
-    free(ctx->buf_a);
-    free(ctx->buf_b);
-    ctx->buf_a = (float *)malloc(needed * sizeof(float));
-    ctx->buf_b = (float *)malloc(needed * sizeof(float));
-    ctx->buf_cap = needed;
-    if (!ctx->buf_a || !ctx->buf_b) {
-        fprintf(stderr, "vocoder: failed to allocate buffers (%zu floats)\n", needed);
+    /* Compute peak scratch size by simulating T progression through all stages.
+     * Scratch is used one stage at a time (never nested), so we track the max. */
+    static const int bigvgan_rates[] = { 8, 5, 4, 3 };
+    static const int bigvgan_channels[] = { 1536, 768, 384, 192, 96 };
+    static const int dilations[] = { 1, 3, 9 };
+
+    size_t max_scratch = 0;
+    size_t s;
+    int T_cur = T;
+
+    /* Conv1d scratch: padded[c_in, T_padded] + extra.
+     * With USE_BLAS, conv1d uses implicit GEMM (extra = w_slice[c_out*c_in]) when
+     * im2col would exceed 10M floats, otherwise im2col (extra = cols[c_in*kernel*T]).
+     * Without USE_BLAS: always im2col. */
+#ifdef USE_BLAS
+#define VOC_CONV_SCRATCH(c_in, c_out, T, k, T_pad) do { \
+        size_t im2col_n = (size_t)(c_in) * (k) * (T); \
+        s = (size_t)(c_in) * (T_pad); \
+        if (im2col_n <= 10000000) \
+            s += im2col_n; \
+        else \
+            s += (size_t)(c_out) * (c_in); \
+    } while (0)
+#else
+#define VOC_CONV_SCRATCH(c_in, c_out, T, k, T_pad) do { \
+        s = (size_t)(c_in) * (T_pad) \
+          + (size_t)(c_in) * (k) * (T); \
+    } while (0)
+#endif
+
+    /* Pre-conv: c_in=512, c_out=1024, k=3 */
+    VOC_CONV_SCRATCH(VOC_PRE_CONV_IN, VOC_PRE_CONV_OUT, T_cur,
+                     VOC_PRE_CONV_KERNEL, T_cur + VOC_PRE_CONV_KERNEL - 1);
+    if (s > max_scratch) max_scratch = s;
+
+    /* Upsample ConvTranspose cols: [c_out * kernel, T_cur] = [1024*2, T_cur] */
+    for (int i = 0; i < VOC_UPSAMPLE_STAGES; i++) {
+        s = (size_t)VOC_UPSAMPLE_CHANNELS * 2 * T_cur; /* cols for transpose */
+        if (s > max_scratch) max_scratch = s;
+        T_cur *= 2; /* stride=2 */
+        /* ConvNeXt: residual + depthwise_scratch + pointwise_scratch */
+        s = (size_t)VOC_UPSAMPLE_CHANNELS * T_cur * 6;
+        if (s > max_scratch) max_scratch = s;
+    }
+
+    /* BigVGAN init conv: c_in=1024, c_out=1536, k=7 */
+    VOC_CONV_SCRATCH(1024, 1536, T_cur, 7, T_cur + 6);
+    if (s > max_scratch) max_scratch = s;
+
+    /* BigVGAN blocks: ConvTranspose cols + ResUnit scratch */
+    for (int b = 0; b < VOC_BIGVGAN_NUM_BLOCKS; b++) {
+        int tconv_kernel = 2 * bigvgan_rates[b];
+        int ch_in = bigvgan_channels[b];
+        int ch_out = bigvgan_channels[b + 1];
+
+        /* ConvTranspose cols: [ch_out * tconv_kernel, T_cur] */
+        s = (size_t)ch_out * tconv_kernel * T_cur;
+        if (s > max_scratch) max_scratch = s;
+
+        T_cur = (T_cur + 1) * bigvgan_rates[b] - tconv_kernel;
+        int ch = ch_out;
+        for (int r = 0; r < VOC_BIGVGAN_RESUNITS; r++) {
+            /* ResUnit scratch: residual[ch*T] + conv_out[ch*T] + conv_scratch */
+            int T_padded = T_cur + dilations[r] * 6;
+            size_t conv_scratch;
+            VOC_CONV_SCRATCH(ch, ch, T_cur, VOC_BIGVGAN_RES_KERNEL, T_padded);
+            conv_scratch = s;
+            s = (size_t)ch * T_cur * 2 + conv_scratch;
+            if (s > max_scratch) max_scratch = s;
+        }
+    }
+
+    /* Final conv: c_in=96, c_out=1, k=7 */
+    VOC_CONV_SCRATCH(96, 1, T_cur, 7, T_cur + 6);
+    if (s > max_scratch) max_scratch = s;
+
+#undef VOC_CONV_SCRATCH
+
+    if (max_scratch > ctx->scratch_cap) {
+        free(ctx->scratch);
+        ctx->scratch = (float *)malloc(max_scratch * sizeof(float));
+        ctx->scratch_cap = max_scratch;
+        if (!ctx->scratch) {
+            fprintf(stderr, "vocoder: failed to allocate scratch (%zu floats)\n", max_scratch);
+        }
     }
 }
 
@@ -501,13 +588,17 @@ static void run_resunit(float *x, const voc_resunit_t *ru, int channels, int T,
  * ======================================================================== */
 
 float *tts_vocoder_run(tts_vocoder_ctx_t *ctx, const int64_t *codes,
-                        int n_steps, int *out_n_samples) {
+                        int n_steps, int *out_n_samples,
+                        voc_timing_t *timing) {
     *out_n_samples = 0;
     int T = n_steps;
 
-    LARGE_INTEGER freq, t_start;
+    LARGE_INTEGER freq, t_start, t_prev, t_now;
     QueryPerformanceFrequency(&freq);
     QueryPerformanceCounter(&t_start);
+    t_prev = t_start;
+
+    if (timing) memset(timing, 0, sizeof(*timing));
 
     ensure_buffers(ctx, T);
 
@@ -521,48 +612,51 @@ float *tts_vocoder_run(tts_vocoder_ctx_t *ctx, const int64_t *codes,
 
     rvq_decode(ctx, codes, T, cur);
 
+    QueryPerformanceCounter(&t_now);
+    if (timing) {
+        timing->rvq_ms = (double)(t_now.QuadPart - t_prev.QuadPart) * 1000.0 / (double)freq.QuadPart;
+    }
     if (ctx->verbose) {
-        LARGE_INTEGER t_now;
-        QueryPerformanceCounter(&t_now);
         double ms = (double)(t_now.QuadPart - t_start.QuadPart) * 1000.0 / (double)freq.QuadPart;
         printf("    RVQ decode: [512, %d] (%.0f ms)\n", T, ms);
         fflush(stdout);
     }
+    t_prev = t_now;
 
     /* Stage 2: Pre-conv CausalConv1d(512, 1024, k=3) -> [1024, T] */
     float *next = ctx->buf_b;
-    float *scratch;
-    {
-        size_t conv_scratch_size = (size_t)VOC_PRE_CONV_IN * (T + 2) +
-                                   (size_t)VOC_PRE_CONV_IN * VOC_PRE_CONV_KERNEL * T;
-        scratch = (float *)malloc(conv_scratch_size * sizeof(float));
-        voc_conv1d_causal(next, cur, ctx->pre_conv_weight, ctx->pre_conv_bias,
-                           VOC_PRE_CONV_IN, VOC_PRE_CONV_OUT, T,
-                           VOC_PRE_CONV_KERNEL, 1, 1, scratch);
-        free(scratch);
-    }
+    float *scratch = ctx->scratch;
+    voc_conv1d_causal(next, cur, ctx->pre_conv_weight, ctx->pre_conv_bias,
+                       VOC_PRE_CONV_IN, VOC_PRE_CONV_OUT, T,
+                       VOC_PRE_CONV_KERNEL, 1, 1, scratch);
     cur = next;
 
+    QueryPerformanceCounter(&t_now);
+    if (timing) {
+        timing->preconv_ms = (double)(t_now.QuadPart - t_prev.QuadPart) * 1000.0 / (double)freq.QuadPart;
+    }
     if (ctx->verbose) {
-        LARGE_INTEGER t_now;
-        QueryPerformanceCounter(&t_now);
         double ms = (double)(t_now.QuadPart - t_start.QuadPart) * 1000.0 / (double)freq.QuadPart;
         printf("    pre_conv: [1024, %d] (%.0f ms)\n", T, ms);
         fflush(stdout);
     }
+    t_prev = t_now;
 
     /* Stage 3: Pre-transformer -> [1024, T] (no external residual) */
     next = ctx->buf_a;
     voc_pre_transformer(ctx, next, cur, T);
     cur = next;
 
+    QueryPerformanceCounter(&t_now);
+    if (timing) {
+        timing->xfmr_ms = (double)(t_now.QuadPart - t_prev.QuadPart) * 1000.0 / (double)freq.QuadPart;
+    }
     if (ctx->verbose) {
-        LARGE_INTEGER t_now;
-        QueryPerformanceCounter(&t_now);
         double ms = (double)(t_now.QuadPart - t_start.QuadPart) * 1000.0 / (double)freq.QuadPart;
         printf("    pre_transformer: [1024, %d] (%.0f ms)\n", T, ms);
         fflush(stdout);
     }
+    t_prev = t_now;
 
     /* Stage 4: ConvNeXt Upsample (2 stages, each 2x) -> [1024, 4T] */
     for (int s = 0; s < VOC_UPSAMPLE_STAGES; s++) {
@@ -572,24 +666,24 @@ float *tts_vocoder_run(tts_vocoder_ctx_t *ctx, const int64_t *codes,
         next = (cur == ctx->buf_a) ? ctx->buf_b : ctx->buf_a;
         voc_conv_transpose1d(next, cur, us->tconv_weight, us->tconv_bias,
                               VOC_UPSAMPLE_CHANNELS, VOC_UPSAMPLE_CHANNELS,
-                              T, us->stride, us->stride);
+                              T, us->stride, us->stride, scratch);
         T = T_out;
         cur = next;
 
-        size_t cn_scratch = (size_t)VOC_UPSAMPLE_CHANNELS * T * 6;
-        scratch = (float *)malloc(cn_scratch * sizeof(float));
         run_convnext(ctx, cur, VOC_UPSAMPLE_CHANNELS, T, &us->convnext, scratch);
-        free(scratch);
 
+        QueryPerformanceCounter(&t_now);
+        if (timing) {
+            timing->upsample_ms[s] = (double)(t_now.QuadPart - t_prev.QuadPart) * 1000.0 / (double)freq.QuadPart;
+        }
         if (ctx->verbose) {
             printf("    upsample%d: [1024, %d]\n", s, T);
             fflush(stdout);
         }
+        t_prev = t_now;
     }
 
     if (ctx->verbose) {
-        LARGE_INTEGER t_now;
-        QueryPerformanceCounter(&t_now);
         double ms = (double)(t_now.QuadPart - t_start.QuadPart) * 1000.0 / (double)freq.QuadPart;
         printf("    upsample: [1024, %d] (%.0f ms)\n", T, ms);
         fflush(stdout);
@@ -599,17 +693,19 @@ float *tts_vocoder_run(tts_vocoder_ctx_t *ctx, const int64_t *codes,
     /* Init conv: CausalConv1d(1024, 1536, k=7) */
     {
         next = (cur == ctx->buf_a) ? ctx->buf_b : ctx->buf_a;
-        size_t sc_size = (size_t)1024 * (T + 6) + (size_t)1024 * 7 * T;
-        scratch = (float *)malloc(sc_size * sizeof(float));
         voc_conv1d_causal(next, cur, ctx->bigvgan.init_weight, ctx->bigvgan.init_bias,
                            1024, VOC_BIGVGAN_INIT_CH, T, 7, 1, 1, scratch);
-        free(scratch);
         cur = next;
 
+        QueryPerformanceCounter(&t_now);
+        if (timing) {
+            timing->bigvgan_init_ms = (double)(t_now.QuadPart - t_prev.QuadPart) * 1000.0 / (double)freq.QuadPart;
+        }
         if (ctx->verbose) {
             printf("    bigvgan_init: [1536, %d]\n", T);
             fflush(stdout);
         }
+        t_prev = t_now;
     }
 
     /* 4 BigVGAN blocks */
@@ -623,26 +719,30 @@ float *tts_vocoder_run(tts_vocoder_ctx_t *ctx, const int64_t *codes,
 
         next = (cur == ctx->buf_a) ? ctx->buf_b : ctx->buf_a;
         voc_conv_transpose1d(next, cur, blk->tconv_weight, blk->tconv_bias,
-                              blk->in_ch, blk->out_ch, T, tconv_kernel, blk->rate);
+                              blk->in_ch, blk->out_ch, T, tconv_kernel, blk->rate,
+                              scratch);
         T = T_out;
         cur = next;
 
+        LARGE_INTEGER t_mid;
+        QueryPerformanceCounter(&t_mid);
+
         for (int r = 0; r < VOC_BIGVGAN_RESUNITS; r++) {
-            size_t ru_scratch = (size_t)blk->out_ch * T * 4 +
-                                (size_t)blk->out_ch * (T + blk->resunits[r].dilation * 6 + 10) +
-                                (size_t)blk->out_ch * VOC_BIGVGAN_RES_KERNEL * T;
-            scratch = (float *)malloc(ru_scratch * sizeof(float));
             run_resunit(cur, &blk->resunits[r], blk->out_ch, T, scratch);
-            free(scratch);
         }
 
+        QueryPerformanceCounter(&t_now);
+        if (timing) {
+            timing->bigvgan_block_ms[b] = (double)(t_now.QuadPart - t_prev.QuadPart) * 1000.0 / (double)freq.QuadPart;
+            timing->bigvgan_tconv_ms[b] = (double)(t_mid.QuadPart - t_prev.QuadPart) * 1000.0 / (double)freq.QuadPart;
+            timing->bigvgan_res_ms[b] = (double)(t_now.QuadPart - t_mid.QuadPart) * 1000.0 / (double)freq.QuadPart;
+        }
         if (ctx->verbose) {
-            LARGE_INTEGER t_now;
-            QueryPerformanceCounter(&t_now);
             double ms = (double)(t_now.QuadPart - t_start.QuadPart) * 1000.0 / (double)freq.QuadPart;
             printf("    bigvgan block %d: [%d, %d] (%.0f ms)\n", b, blk->out_ch, T, ms);
             fflush(stdout);
         }
+        t_prev = t_now;
     }
 
     /* Final: SnakeBeta(96) -> CausalConv1d(96, 1, k=7) -> clamp(-1, 1) */
@@ -650,22 +750,20 @@ float *tts_vocoder_run(tts_vocoder_ctx_t *ctx, const int64_t *codes,
                     96, T);
 
     next = (cur == ctx->buf_a) ? ctx->buf_b : ctx->buf_a;
-    {
-        size_t sc_size = (size_t)96 * (T + 6) + (size_t)96 * 7 * T;
-        scratch = (float *)malloc(sc_size * sizeof(float));
-        voc_conv1d_causal(next, cur, ctx->bigvgan.final_weight, ctx->bigvgan.final_bias,
-                           96, 1, T, 7, 1, 1, scratch);
-        free(scratch);
-    }
+    voc_conv1d_causal(next, cur, ctx->bigvgan.final_weight, ctx->bigvgan.final_bias,
+                       96, 1, T, 7, 1, 1, scratch);
 
     for (int i = 0; i < T; i++) {
         if (next[i] > 1.0f) next[i] = 1.0f;
         if (next[i] < -1.0f) next[i] = -1.0f;
     }
 
+    QueryPerformanceCounter(&t_now);
+    if (timing) {
+        timing->final_ms = (double)(t_now.QuadPart - t_prev.QuadPart) * 1000.0 / (double)freq.QuadPart;
+        timing->total_ms = (double)(t_now.QuadPart - t_start.QuadPart) * 1000.0 / (double)freq.QuadPart;
+    }
     if (ctx->verbose) {
-        LARGE_INTEGER t_now;
-        QueryPerformanceCounter(&t_now);
         double ms = (double)(t_now.QuadPart - t_start.QuadPart) * 1000.0 / (double)freq.QuadPart;
         printf("    final: %d samples (%.0f ms total)\n", T, ms);
         fflush(stdout);
@@ -778,6 +876,7 @@ void tts_vocoder_free(tts_vocoder_ctx_t *ctx) {
     free(ctx->bigvgan.final_weight); free(ctx->bigvgan.final_bias);
 
     free(ctx->buf_a); free(ctx->buf_b);
+    free(ctx->scratch);
     free(ctx->xfmr_q); free(ctx->xfmr_k); free(ctx->xfmr_v);
     free(ctx->xfmr_attn_out); free(ctx->xfmr_proj_out);
     free(ctx->xfmr_norm_buf); free(ctx->xfmr_gate_up);

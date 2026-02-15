@@ -1,9 +1,17 @@
 @echo off
 REM Build local-ai-server.exe -- OpenAI-compatible local inference server
 REM Can be run from any terminal and any directory
+REM
+REM Usage: build.bat [target]
+REM   (no target) - build server (default)
+REM   bench       - build vocoder-bench.exe
 
 setlocal EnableDelayedExpansion
 cd /d "%~dp0"
+
+REM Parse target (default: server)
+set TARGET=server
+if /I "%~1"=="bench" set TARGET=bench
 
 REM Auto-setup MSVC environment if not already configured
 where cl.exe >nul 2>&1
@@ -129,9 +137,6 @@ if defined ORT_DIR (
 REM Qwen-ASR source files (excluding main.c -- server has its own entry point)
 set QWEN_SOURCES="%QWEN_ASR_DIR%\qwen_asr.c" "%QWEN_ASR_DIR%\qwen_asr_audio.c" "%QWEN_ASR_DIR%\qwen_asr_decoder.c" "%QWEN_ASR_DIR%\qwen_asr_encoder.c" "%QWEN_ASR_DIR%\qwen_asr_kernels.c" "%QWEN_ASR_DIR%\qwen_asr_kernels_avx.c" "%QWEN_ASR_DIR%\qwen_asr_kernels_generic.c" "%QWEN_ASR_DIR%\qwen_asr_safetensors.c" "%QWEN_ASR_DIR%\qwen_asr_tokenizer.c" "%QWEN_ASR_DIR%\qwen_asr_gpu.c"
 
-REM Server source files
-set SRV_SOURCES=src\main.c src\http.c src\multipart.c src\handler_asr.c src\json.c src\json_reader.c src\handler_tts.c src\tts_ort.c src\tts_pipeline.c src\tts_sampling.c src\tts_native.c src\tts_vocoder.c src\tts_vocoder_ops.c src\tts_vocoder_xfmr.c
-
 REM Compile qwen-asr sources with full optimization (inference is CPU-bound)
 echo Compiling qwen-asr (optimized)...
 cl /nologo /W3 /O2 /arch:AVX2 /fp:fast /DNDEBUG !BLAS_CFLAGS! !CUDA_CFLAGS! /I"%QWEN_ASR_DIR%" /c %QWEN_SOURCES% /Fo:"%BUILD_DIR%\\"
@@ -139,6 +144,29 @@ if %ERRORLEVEL% NEQ 0 (
     echo qwen-asr compilation failed.
     exit /b 1
 )
+
+REM Collect qwen-asr object files (shared by all targets)
+set QWEN_OBJS="%BUILD_DIR%\qwen_asr.obj" "%BUILD_DIR%\qwen_asr_audio.obj" "%BUILD_DIR%\qwen_asr_decoder.obj" "%BUILD_DIR%\qwen_asr_encoder.obj" "%BUILD_DIR%\qwen_asr_kernels.obj" "%BUILD_DIR%\qwen_asr_kernels_avx.obj" "%BUILD_DIR%\qwen_asr_kernels_generic.obj" "%BUILD_DIR%\qwen_asr_safetensors.obj" "%BUILD_DIR%\qwen_asr_tokenizer.obj" "%BUILD_DIR%\qwen_asr_gpu.obj"
+
+REM Vocoder source files (compiled with optimization -- inference-critical, same as qwen-asr)
+set VOC_SOURCES=src\tts_vocoder.c src\tts_vocoder_ops.c src\tts_vocoder_xfmr.c
+
+echo Compiling vocoder (optimized)...
+cl /nologo /W3 /O2 /arch:AVX2 /fp:fast /DNDEBUG !BLAS_CFLAGS! !CUDA_CFLAGS! !ORT_CFLAGS! /I"%QWEN_ASR_DIR%" /Isrc /c %VOC_SOURCES% /Fo:"%BUILD_DIR%\\"
+if %ERRORLEVEL% NEQ 0 (
+    echo Vocoder compilation failed.
+    exit /b 1
+)
+
+set VOC_OBJS="%BUILD_DIR%\tts_vocoder.obj" "%BUILD_DIR%\tts_vocoder_ops.obj" "%BUILD_DIR%\tts_vocoder_xfmr.obj"
+
+REM ---- Target: bench ----
+if /I "%TARGET%"=="bench" goto :build_bench
+
+REM ---- Target: server (default) ----
+
+REM Server source files (excluding vocoder -- compiled separately with optimization)
+set SRV_SOURCES=src\main.c src\http.c src\multipart.c src\handler_asr.c src\json.c src\json_reader.c src\handler_tts.c src\tts_ort.c src\tts_pipeline.c src\tts_sampling.c src\tts_native.c
 
 REM Compile server sources with debug info
 echo Compiling server (debug)...
@@ -148,13 +176,12 @@ if %ERRORLEVEL% NEQ 0 (
     exit /b 1
 )
 
-REM Collect all object files
-set QWEN_OBJS="%BUILD_DIR%\qwen_asr.obj" "%BUILD_DIR%\qwen_asr_audio.obj" "%BUILD_DIR%\qwen_asr_decoder.obj" "%BUILD_DIR%\qwen_asr_encoder.obj" "%BUILD_DIR%\qwen_asr_kernels.obj" "%BUILD_DIR%\qwen_asr_kernels_avx.obj" "%BUILD_DIR%\qwen_asr_kernels_generic.obj" "%BUILD_DIR%\qwen_asr_safetensors.obj" "%BUILD_DIR%\qwen_asr_tokenizer.obj" "%BUILD_DIR%\qwen_asr_gpu.obj"
-set SRV_OBJS="%BUILD_DIR%\main.obj" "%BUILD_DIR%\http.obj" "%BUILD_DIR%\multipart.obj" "%BUILD_DIR%\handler_asr.obj" "%BUILD_DIR%\json.obj" "%BUILD_DIR%\json_reader.obj" "%BUILD_DIR%\handler_tts.obj" "%BUILD_DIR%\tts_ort.obj" "%BUILD_DIR%\tts_pipeline.obj" "%BUILD_DIR%\tts_sampling.obj" "%BUILD_DIR%\tts_native.obj" "%BUILD_DIR%\tts_vocoder.obj" "%BUILD_DIR%\tts_vocoder_ops.obj" "%BUILD_DIR%\tts_vocoder_xfmr.obj"
+REM Collect server object files
+set SRV_OBJS="%BUILD_DIR%\main.obj" "%BUILD_DIR%\http.obj" "%BUILD_DIR%\multipart.obj" "%BUILD_DIR%\handler_asr.obj" "%BUILD_DIR%\json.obj" "%BUILD_DIR%\json_reader.obj" "%BUILD_DIR%\handler_tts.obj" "%BUILD_DIR%\tts_ort.obj" "%BUILD_DIR%\tts_pipeline.obj" "%BUILD_DIR%\tts_sampling.obj" "%BUILD_DIR%\tts_native.obj"
 
 REM Link everything together
-echo Linking...
-link /nologo /DEBUG /SUBSYSTEM:CONSOLE /OUT:"%BIN_DIR%\local-ai-server.exe" %SRV_OBJS% %QWEN_OBJS% !BLAS_LIBS! !CUDA_LIBS! !ORT_LIBS! ws2_32.lib advapi32.lib psapi.lib
+echo Linking server...
+link /nologo /DEBUG /SUBSYSTEM:CONSOLE /OUT:"%BIN_DIR%\local-ai-server.exe" %SRV_OBJS% %VOC_OBJS% %QWEN_OBJS% !BLAS_LIBS! !CUDA_LIBS! !ORT_LIBS! ws2_32.lib advapi32.lib psapi.lib
 
 if %ERRORLEVEL% EQU 0 (
     echo.
@@ -164,3 +191,33 @@ if %ERRORLEVEL% EQU 0 (
     echo Build failed.
     exit /b 1
 )
+goto :eof
+
+REM ---- Target: bench ----
+:build_bench
+
+REM Bench uses shared TTS sources (no server main/http/handlers) + its own main
+REM Vocoder objs are already compiled above with optimization
+set BENCH_SOURCES=tools\vocoder_bench.c src\tts_ort.c src\tts_pipeline.c src\tts_sampling.c src\tts_native.c
+
+echo Compiling vocoder-bench...
+cl /nologo /W3 /Od /Zi /DDEBUG !BLAS_CFLAGS! !CUDA_CFLAGS! !ORT_CFLAGS! /I"%QWEN_ASR_DIR%" /Isrc /c %BENCH_SOURCES% /Fo:"%BUILD_DIR%\\"
+if %ERRORLEVEL% NEQ 0 (
+    echo Bench compilation failed.
+    exit /b 1
+)
+
+set BENCH_OBJS="%BUILD_DIR%\vocoder_bench.obj" "%BUILD_DIR%\tts_ort.obj" "%BUILD_DIR%\tts_pipeline.obj" "%BUILD_DIR%\tts_sampling.obj" "%BUILD_DIR%\tts_native.obj"
+
+echo Linking vocoder-bench...
+link /nologo /DEBUG /SUBSYSTEM:CONSOLE /OUT:"%BIN_DIR%\vocoder-bench.exe" %BENCH_OBJS% %VOC_OBJS% %QWEN_OBJS% !BLAS_LIBS! !CUDA_LIBS! !ORT_LIBS! ws2_32.lib advapi32.lib psapi.lib
+
+if %ERRORLEVEL% EQU 0 (
+    echo.
+    echo Build complete: %BIN_DIR%\vocoder-bench.exe
+) else (
+    echo.
+    echo Build failed.
+    exit /b 1
+)
+goto :eof

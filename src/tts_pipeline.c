@@ -239,7 +239,7 @@ int tts_pipeline_synthesize(TtsPipeline *tts, const char *text,
         fflush(stdout);
     }
     int n_samples = 0;
-    float *audio = tts_vocoder_run(tts->vocoder, codes, n_steps, &n_samples);
+    float *audio = tts_vocoder_run(tts->vocoder, codes, n_steps, &n_samples, NULL);
     free(codes);
 
     if (tts->verbose) {
