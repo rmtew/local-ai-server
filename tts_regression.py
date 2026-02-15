@@ -258,9 +258,9 @@ def check_server(server: str, timeout_s: int = 5) -> bool:
         return False
 
 
-def check_tts_available(server: str, timeout_s: int = 5) -> bool:
+def check_tts_available(server: str, timeout_s: int = 60) -> bool:
     """Check if TTS is loaded on the server (not 501)."""
-    payload = json.dumps({"input": "test"}).encode("utf-8")
+    payload = json.dumps({"input": "test", "seed": 0}).encode("utf-8")
     req = urllib.request.Request(
         f"{server}/v1/audio/speech",
         data=payload,
