@@ -60,6 +60,7 @@ static void print_usage(const char *prog) {
     printf("  --port=<N>         Listen port (default: 8090)\n");
     printf("  --language=<lang>  Force ASR language (default: auto-detect)\n");
     printf("  --threads=<N>      CPU threads for inference (default: 4)\n");
+    printf("  --fp16             Store TTS GPU weights as FP16 (halves VRAM)\n");
     printf("  --verbose          Enable verbose logging\n");
     printf("  --help             Show this help message\n");
     printf("\nASR languages: %s\n", qwen_supported_languages_csv());
@@ -92,6 +93,7 @@ int main(int argc, char **argv) {
     const char *language = NULL;
     int threads = 4;
     int verbose = 0;
+    int fp16 = 0;
 
     /* Parse arguments */
     for (int i = 1; i < argc; i++) {
@@ -108,6 +110,8 @@ int main(int argc, char **argv) {
             threads = atoi(val);
         } else if (strcmp(argv[i], "--verbose") == 0) {
             verbose = 1;
+        } else if (strcmp(argv[i], "--fp16") == 0) {
+            fp16 = 1;
         } else if (strcmp(argv[i], "--help") == 0 || strcmp(argv[i], "-h") == 0) {
             print_usage(argv[0]);
             return 0;
@@ -161,7 +165,7 @@ int main(int argc, char **argv) {
             if (asr_ctx) qwen_free(asr_ctx);
             return 1;
         }
-        if (tts_pipeline_init(tts_pipeline, tts_model_dir, verbose) != 0) {
+        if (tts_pipeline_init(tts_pipeline, tts_model_dir, fp16, verbose) != 0) {
             fprintf(stderr, "Error: failed to load TTS model from %s\n", tts_model_dir);
             free(tts_pipeline);
             if (asr_ctx) qwen_free(asr_ctx);
@@ -191,8 +195,10 @@ int main(int argc, char **argv) {
     printf("Port:     %d\n", port);
     if (model_dir)
         printf("ASR:      %s\n", model_dir);
-    if (tts_model_dir)
+    if (tts_model_dir) {
         printf("TTS:      %s\n", tts_model_dir);
+        if (fp16) printf("          FP16 GPU weights\n");
+    }
     if (language)
         printf("Language: %s\n", language);
     printf("Threads:  %d\n", threads);

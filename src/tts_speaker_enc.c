@@ -1,7 +1,8 @@
 /*
  * tts_speaker_enc.c - ECAPA-TDNN speaker encoder for Qwen3-TTS
  *
- * Computes 1024-dim speaker embeddings from 128-band mel spectrograms.
+ * Computes speaker embeddings from 128-band mel spectrograms.
+ * Output dimension: 1024 (0.6B model) or 2048 (1.7B model), auto-detected.
  * Uses same-padded Conv1d (not causal like the vocoder).
  */
 
@@ -241,7 +242,16 @@ int tts_speaker_enc_init(tts_speaker_enc_ctx_t *ctx,
         goto fail;
     }
 
-    /* FC */
+    /* FC — detect embed_dim from weight shape: [embed_dim, 3072, 1] or [embed_dim, 3072] */
+    {
+        safetensors_file_t *sf_fc = NULL;
+        const safetensor_t *fc_t = multi_safetensors_find(ms, "speaker_encoder.fc.weight", &sf_fc);
+        if (!fc_t) {
+            fprintf(stderr, "TTS speaker encoder: failed to find FC weight\n");
+            goto fail;
+        }
+        ctx->embed_dim = (int)fc_t->shape[0];
+    }
     ctx->fc_weight = load_f32(ms, "speaker_encoder.fc.weight");
     ctx->fc_bias = load_f32(ms, "speaker_encoder.fc.bias");
     if (!ctx->fc_weight || !ctx->fc_bias) {
@@ -250,7 +260,8 @@ int tts_speaker_enc_init(tts_speaker_enc_ctx_t *ctx,
     }
 
     ctx->loaded = 1;
-    if (verbose) printf("TTS speaker encoder: loaded (76 tensors, ECAPA-TDNN)\n");
+    if (verbose) printf("TTS speaker encoder: loaded (76 tensors, ECAPA-TDNN, embed_dim=%d)\n",
+                        ctx->embed_dim);
     return 0;
 
 fail:
@@ -611,7 +622,7 @@ int tts_speaker_enc_forward(tts_speaker_enc_ctx_t *ctx,
     free(mfa_out);
     free(mfa_concat);
 
-    /* FC: concat(w_mean, w_std) -> [3072] -> Conv1d(3072->1024, k=1) -> [1024] */
+    /* FC: concat(w_mean, w_std) -> [3072] -> Conv1d(3072->embed_dim, k=1) -> [embed_dim] */
     float *fc_input = (float *)malloc(2 * mfa_ch * sizeof(float));
     if (!fc_input) {
         free(w_mean); free(w_std); free(scratch);
@@ -622,9 +633,9 @@ int tts_speaker_enc_forward(tts_speaker_enc_ctx_t *ctx,
     free(w_mean);
     free(w_std);
 
-    /* FC projection: [3072] -> [1024] (T=1 since pooled) */
+    /* FC projection: [3072] -> [embed_dim] (T=1 since pooled) */
     conv1d_k1(out_embedding, fc_input, ctx->fc_weight, ctx->fc_bias,
-              2 * mfa_ch, SPKENC_EMBED_DIM, 1);
+              2 * mfa_ch, ctx->embed_dim, 1);
 
     free(fc_input);
     free(scratch);

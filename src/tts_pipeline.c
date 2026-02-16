@@ -87,7 +87,7 @@ static unsigned char *encode_wav(const float *samples, int n_samples,
 
 /* ---- Pipeline initialization ---- */
 
-int tts_pipeline_init(TtsPipeline *tts, const char *model_dir, int verbose) {
+int tts_pipeline_init(TtsPipeline *tts, const char *model_dir, int fp16, int verbose) {
     memset(tts, 0, sizeof(*tts));
     tts->verbose = verbose;
 
@@ -122,7 +122,7 @@ int tts_pipeline_init(TtsPipeline *tts, const char *model_dir, int verbose) {
         }
         gpu = g_gpu_ctx;
 #endif
-        if (tts_native_init(tts->native, model_dir, gpu, verbose) != 0) {
+        if (tts_native_init(tts->native, model_dir, gpu, fp16, verbose) != 0) {
             fprintf(stderr, "TTS: native init failed (need model.safetensors in %s)\n", model_dir);
             free(tts->native);
             tts->native = NULL;
@@ -159,9 +159,17 @@ int tts_pipeline_init(TtsPipeline *tts, const char *model_dir, int verbose) {
         char preset_path[512];
         snprintf(preset_path, sizeof(preset_path), "%s/voice_presets.bin", model_dir);
         if (tts_voice_presets_load(&tts->voice_presets, preset_path) == 0) {
-            if (verbose) {
-                printf("TTS: loaded %d voice presets from %s\n",
-                       tts->voice_presets.n_presets, preset_path);
+            /* Validate embed_dim matches model */
+            int model_embed = tts->native->spk_embed_dim;
+            if (tts->voice_presets.embed_dim != model_embed) {
+                fprintf(stderr, "TTS: WARNING: voice presets embed_dim=%d but model expects %d"
+                        " — presets will be ignored\n",
+                        tts->voice_presets.embed_dim, model_embed);
+                tts_voice_presets_free(&tts->voice_presets);
+            } else if (verbose) {
+                printf("TTS: loaded %d voice presets from %s (embed_dim=%d)\n",
+                       tts->voice_presets.n_presets, preset_path,
+                       tts->voice_presets.embed_dim);
             }
         } else if (verbose) {
             printf("TTS: no voice presets found (voice cloning unavailable)\n");

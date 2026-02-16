@@ -79,6 +79,26 @@ static void linear_bf16(tts_native_ctx_t *ctx, float *out, const float *in,
 }
 
 /* ========================================================================
+ * Dimension Bridge: talker space -> code predictor space
+ * ======================================================================== */
+
+/* Project from talker hidden space to code predictor hidden space.
+ * For 0.6B (H_T == H_CP), mtp_proj_weight is NULL and this is a plain copy.
+ * For 1.7B (H_T=2048, H_CP=1024), applies the mtp_projection linear layer. */
+static void mtp_project(tts_native_ctx_t *ctx, float *out_cp, const float *in_talker) {
+    tts_code_predictor_t *cp = &ctx->code_pred;
+    int H_T = ctx->talker_config.dec_hidden;
+    int H_CP = ctx->cp_config.dec_hidden;
+    if (cp->mtp_proj_weight) {
+        qwen_linear_nobias(out_cp, in_talker, cp->mtp_proj_weight, 1, H_T, H_CP);
+        if (cp->mtp_proj_bias)
+            qwen_add_inplace(out_cp, cp->mtp_proj_bias, H_CP);
+    } else {
+        memcpy(out_cp, in_talker, H_CP * sizeof(float));
+    }
+}
+
+/* ========================================================================
  * Weight Loading
  * ======================================================================== */
 
@@ -128,8 +148,8 @@ static int load_talker_weights(tts_native_ctx_t *ctx) {
 
         /* Fuse gate+up weights: interleave rows [gate_row0, up_row0, ...] */
         {
-            int inter = TTS_INTERMEDIATE;
-            int hidden = TTS_HIDDEN_SIZE;
+            int inter = ctx->talker_config.dec_intermediate;
+            int hidden = ctx->talker_config.dec_hidden;
             size_t row_bytes = (size_t)hidden * sizeof(uint16_t);
             l->gate_up_fused_bf16 = (uint16_t *)malloc(2 * (size_t)inter * row_bytes);
             if (!l->gate_up_fused_bf16) return -1;
@@ -201,8 +221,8 @@ static int load_code_predictor_weights(tts_native_ctx_t *ctx) {
 
         /* Fuse gate+up */
         {
-            int inter = TTS_INTERMEDIATE;
-            int hidden = TTS_HIDDEN_SIZE;
+            int inter = ctx->cp_config.dec_intermediate;
+            int hidden = ctx->cp_config.dec_hidden;
             size_t row_bytes = (size_t)hidden * sizeof(uint16_t);
             l->gate_up_fused_bf16 = (uint16_t *)malloc(2 * (size_t)inter * row_bytes);
             if (!l->gate_up_fused_bf16) return -1;
@@ -256,7 +276,7 @@ static int load_embedding_weights(tts_native_ctx_t *ctx) {
         return -1;
     }
 
-    /* Codec embedding: [3072, 1024] bf16 */
+    /* Codec embedding: [3072, talker_hidden] bf16 */
     ctx->codec_embed_bf16 = load_bf16_direct(ms, "talker.model.codec_embedding.weight");
     if (!ctx->codec_embed_bf16) {
         fprintf(stderr, "TTS native: failed to load codec_embedding\n");
@@ -402,10 +422,10 @@ static int ensure_rope_cache(tts_native_ctx_t *ctx, int n_pos) {
 
 static void ensure_dec_buffers(tts_native_ctx_t *ctx) {
     if (ctx->dec_x) return;
-    int dim = TTS_HIDDEN_SIZE;
+    int dim = ctx->talker_config.dec_hidden;
     int q_dim = TTS_NUM_HEADS * TTS_HEAD_DIM;
     int kv_dim = TTS_NUM_KV_HEADS * TTS_HEAD_DIM;
-    int intermediate = TTS_INTERMEDIATE;
+    int intermediate = ctx->talker_config.dec_intermediate;
 
     ctx->dec_x        = (float *)malloc(dim * sizeof(float));
     ctx->dec_x_norm   = (float *)malloc(dim * sizeof(float));
@@ -420,10 +440,11 @@ static void ensure_dec_buffers(tts_native_ctx_t *ctx) {
 
 static void ensure_prefill_buffers(tts_native_ctx_t *ctx, int seq_len) {
     if (ctx->pref_seq_cap >= seq_len) return;
-    int dim = TTS_HIDDEN_SIZE;
+    /* Always allocate at talker dimensions (>= code predictor dimensions) */
+    int dim = ctx->talker_config.dec_hidden;
     int q_dim = TTS_NUM_HEADS * TTS_HEAD_DIM;
     int kv_dim = TTS_NUM_KV_HEADS * TTS_HEAD_DIM;
-    int intermediate = TTS_INTERMEDIATE;
+    int intermediate = ctx->talker_config.dec_intermediate;
 
     free(ctx->pref_x);       free(ctx->pref_x_norm);
     free(ctx->pref_q);       free(ctx->pref_k);       free(ctx->pref_v);
@@ -454,13 +475,13 @@ static void embed_lookup_bf16(float *dst, const uint16_t *table,
     bf16_to_f32_row(dst, table + (size_t)token_id * dim, dim);
 }
 
-/* Embed N text tokens: table lookup (2048-dim) + MLP projection -> 1024-dim.
- * out: [N, 1024]. Allocates temporary buffers internally. */
+/* Embed N text tokens: table lookup (2048-dim) + MLP projection -> talker_hidden-dim.
+ * out: [N, talker_hidden]. Allocates temporary buffers internally. */
 static void text_embed_and_project(tts_native_ctx_t *ctx,
                                    const int64_t *ids, int n,
                                    float *out) {
     int text_dim = TTS_TEXT_HIDDEN_SIZE;  /* 2048 */
-    int hidden = TTS_HIDDEN_SIZE;         /* 1024 */
+    int hidden = ctx->talker_config.dec_hidden;  /* 1024 or 2048 */
     tts_text_project_t *tp = &ctx->text_project;
     int inter = tp->intermediate;
 
@@ -482,7 +503,7 @@ static void text_embed_and_project(tts_native_ctx_t *ctx,
     /* Step 3: SiLU activation in-place */
     qwen_silu(inter_buf, n * inter);
 
-    /* Step 4: fc2: [N, intermediate] -> [N, 1024] */
+    /* Step 4: fc2: [N, intermediate] -> [N, talker_hidden] */
     linear_bf16(ctx, out, inter_buf, tp->fc2_weight_bf16, n, inter, hidden);
     if (tp->fc2_bias) {
         for (int i = 0; i < n; i++)
@@ -495,7 +516,7 @@ static void text_embed_and_project(tts_native_ctx_t *ctx,
 
 /* Look up one codec token from the talker's codec embedding. */
 static void codec_embed_lookup(tts_native_ctx_t *ctx, int token_id, float *out) {
-    embed_lookup_bf16(out, ctx->codec_embed_bf16, token_id, TTS_HIDDEN_SIZE);
+    embed_lookup_bf16(out, ctx->codec_embed_bf16, token_id, ctx->talker_config.dec_hidden);
 }
 
 /* ========================================================================
@@ -505,11 +526,11 @@ static void codec_embed_lookup(tts_native_ctx_t *ctx, int token_id, float *out) 
 static void talker_prefill(tts_native_ctx_t *ctx, const float *input_embeds,
                            int seq_len) {
     qwen_decoder_t *dec = &ctx->talker;
-    int dim = TTS_HIDDEN_SIZE;
+    int dim = ctx->talker_config.dec_hidden;
     int n_heads = TTS_NUM_HEADS;
     int n_kv_heads = TTS_NUM_KV_HEADS;
     int head_dim = TTS_HEAD_DIM;
-    int intermediate = TTS_INTERMEDIATE;
+    int intermediate = ctx->talker_config.dec_intermediate;
     float eps = TTS_RMS_NORM_EPS;
     int q_dim = n_heads * head_dim;
     int kv_dim = n_kv_heads * head_dim;
@@ -587,11 +608,11 @@ static void talker_prefill(tts_native_ctx_t *ctx, const float *input_embeds,
 static void talker_forward(tts_native_ctx_t *ctx, const float *input_embed,
                            float *hidden_out) {
     qwen_decoder_t *dec = &ctx->talker;
-    int dim = TTS_HIDDEN_SIZE;
+    int dim = ctx->talker_config.dec_hidden;
     int n_heads = TTS_NUM_HEADS;
     int n_kv_heads = TTS_NUM_KV_HEADS;
     int head_dim = TTS_HEAD_DIM;
-    int intermediate = TTS_INTERMEDIATE;
+    int intermediate = ctx->talker_config.dec_intermediate;
     float eps = TTS_RMS_NORM_EPS;
     int q_dim = n_heads * head_dim;
     int kv_dim = n_kv_heads * head_dim;
@@ -661,23 +682,24 @@ static void talker_forward(tts_native_ctx_t *ctx, const float *input_embed,
 /* ========================================================================
  * Code Predictor Forward (prefill-style, no persistent KV cache)
  *
- * Input: cp_embed_buf[seq_len, 1024] (projected_hidden + codec embeds)
+ * Input: cp_embed_buf[seq_len, cp_hidden] (projected_hidden + codec embeds)
  * Output: cp_logits_buf[TTS_CODEC_VOCAB] from lm_head[codebook_idx]
  * ======================================================================== */
 
 static void code_predictor_forward(tts_native_ctx_t *ctx,
                                    int seq_len, int codebook_idx) {
     tts_code_predictor_t *cp = &ctx->code_pred;
-    int dim = TTS_HIDDEN_SIZE;
+    int dim = ctx->cp_config.dec_hidden;
     int n_heads = TTS_NUM_HEADS;
     int n_kv_heads = TTS_NUM_KV_HEADS;
     int head_dim = TTS_HEAD_DIM;
-    int intermediate = TTS_INTERMEDIATE;
+    int intermediate = ctx->cp_config.dec_intermediate;
     float eps = TTS_RMS_NORM_EPS;
     int q_dim = n_heads * head_dim;
     int kv_dim = n_kv_heads * head_dim;
 
-    /* Ensure prefill buffers are large enough for code predictor sequences */
+    /* Ensure prefill buffers are large enough for code predictor sequences.
+     * Buffers are allocated at talker dimensions (>= CP), so always sufficient. */
     ensure_prefill_buffers(ctx, seq_len);
     if (ensure_rope_cache(ctx, seq_len) != 0) return;
 
@@ -725,9 +747,9 @@ static void code_predictor_forward(tts_native_ctx_t *ctx,
         qwen_add_inplace(x, ctx->pref_ffn_out, seq_len * dim);
     }
 
-    /* Final norm on last position */
+    /* Final norm on last position -> use tmp_embed as scratch (sized >= cp_hidden) */
     float *last_hidden = x + (seq_len - 1) * dim;
-    float normed[TTS_HIDDEN_SIZE];
+    float *normed = ctx->tmp_embed;
     qwen_rms_norm(normed, last_hidden, cp->norm, 1, dim, eps);
 
     /* Project through codebook-specific lm_head -> logits */
@@ -834,7 +856,7 @@ static int build_prefill_embeddings(tts_native_ctx_t *ctx,
                                     float **prefill_out, int *prefill_len_out,
                                     float **trailing_out, int *trailing_len_out,
                                     float **tts_pad_embed_out) {
-    int H = TTS_HIDDEN_SIZE;
+    int H = ctx->talker_config.dec_hidden;
 
     /* 1. TTS special token embeddings via text_project */
     int64_t tts_special[] = { TTS_TOKEN_BOS, TTS_TOKEN_EOS, TTS_TOKEN_PAD };
@@ -898,7 +920,7 @@ static int build_prefill_embeddings(tts_native_ctx_t *ctx,
         int dst = 0;
         for (int i = 0; i < n_codec; i++) {
             if (i == insert_at && speaker_embed) {
-                /* Insert speaker embedding (raw 1024-dim, already in model space) */
+                /* Insert speaker embedding (spk_embed_dim floats, already in model space) */
                 memcpy(codec_embed + dst * H, speaker_embed, H * sizeof(float));
                 dst++;
             }
@@ -907,8 +929,12 @@ static int build_prefill_embeddings(tts_native_ctx_t *ctx,
         }
     }
 
-    /* 4. First text token embedding via text_project */
-    float text_first_embed[TTS_HIDDEN_SIZE];
+    /* 4. First text token embedding via text_project (use tmp_embed scratch) */
+    if (!ctx->tmp_embed) {
+        ctx->tmp_embed = (float *)malloc(H * sizeof(float));
+        if (!ctx->tmp_embed) { free(tts_special_embed); free(role_embed); free(*tts_pad_embed_out); free(codec_embed); return -1; }
+    }
+    float *text_first_embed = ctx->tmp_embed;
     text_embed_and_project(ctx, &input_ids[role_len], 1, text_first_embed);
 
     /* 5. Assemble prefill:
@@ -979,7 +1005,8 @@ static int64_t *run_decode_loop(tts_native_ctx_t *ctx,
                                 float *tts_pad_embed,
                                 float temperature, int top_k,
                                 int *out_n_steps) {
-    int H = TTS_HIDDEN_SIZE;
+    int H_T = ctx->talker_config.dec_hidden;   /* talker hidden: 1024 or 2048 */
+    int H_CP = ctx->cp_config.dec_hidden;      /* code predictor hidden: always 1024 */
     *out_n_steps = 0;
 
     int64_t *all_codes = (int64_t *)malloc((size_t)TTS_MAX_DECODE_STEPS * TTS_NUM_CODE_GROUPS * sizeof(int64_t));
@@ -987,10 +1014,22 @@ static int64_t *run_decode_loop(tts_native_ctx_t *ctx,
     if (!all_codes || !cb0_history) { free(all_codes); free(cb0_history); return NULL; }
     int history_len = 0;
 
-    /* Allocate code predictor input buffer */
+    /* Allocate code predictor input buffer (in CP space) */
     if (!ctx->cp_embed_buf) {
-        ctx->cp_embed_buf = (float *)malloc(18 * H * sizeof(float));
+        ctx->cp_embed_buf = (float *)malloc(18 * H_CP * sizeof(float));
         if (!ctx->cp_embed_buf) { free(all_codes); free(cb0_history); return NULL; }
+    }
+
+    /* Allocate codec_sum buffer (in talker space) */
+    if (!ctx->codec_sum_buf) {
+        ctx->codec_sum_buf = (float *)malloc(H_T * sizeof(float));
+        if (!ctx->codec_sum_buf) { free(all_codes); free(cb0_history); return NULL; }
+    }
+
+    /* Allocate tmp_embed (in talker space, scratch for embedding lookups) */
+    if (!ctx->tmp_embed) {
+        ctx->tmp_embed = (float *)malloc(H_T * sizeof(float));
+        if (!ctx->tmp_embed) { free(all_codes); free(cb0_history); return NULL; }
     }
 
     /* Allocate logits buffers */
@@ -1010,14 +1049,14 @@ static int64_t *run_decode_loop(tts_native_ctx_t *ctx,
     /* After prefill, dec_x contains final-normed hidden state of last position.
      * Compute initial logits from it. */
     linear_bf16(ctx, ctx->logits_buf, ctx->dec_x, ctx->codec_head_bf16,
-                1, TTS_HIDDEN_SIZE, TTS_TALKER_VOCAB);
+                1, H_T, TTS_TALKER_VOCAB);
 
     /* Code predictor needs the NORMED hidden state (same as what lm_head sees).
      * In HuggingFace, model.last_hidden_state is after final RMSNorm.
      * dec_x already contains the normed state from talker_prefill. */
-    float *last_hidden_normed = (float *)malloc(H * sizeof(float));
+    float *last_hidden_normed = (float *)malloc(H_T * sizeof(float));
     if (!last_hidden_normed) { free(all_codes); free(cb0_history); return NULL; }
-    memcpy(last_hidden_normed, ctx->dec_x, H * sizeof(float));
+    memcpy(last_hidden_normed, ctx->dec_x, H_T * sizeof(float));
 
     int suppress_start = TTS_TALKER_VOCAB - 1024; /* 2048 */
     int n_steps = 0;
@@ -1067,28 +1106,16 @@ static int64_t *run_decode_loop(tts_native_ctx_t *ctx,
 
         /* ---- Code predictor: sub-codes 1-15 ---- */
 
-        /* Build initial code predictor input: [projected_hidden, cb0_embed] */
         tts_code_predictor_t *cp = &ctx->code_pred;
 
-        /* Project talker hidden through mtp_projection (or pass through) */
-        if (cp->mtp_proj_weight) {
-            float projected[TTS_HIDDEN_SIZE];
-            qwen_linear_nobias(projected, last_hidden_normed, cp->mtp_proj_weight,
-                               1, H, H);
-            if (cp->mtp_proj_bias)
-                qwen_add_inplace(projected, cp->mtp_proj_bias, H);
-            memcpy(ctx->cp_embed_buf, projected, H * sizeof(float));
-        } else {
-            /* Same hidden size -- pass through directly */
-            memcpy(ctx->cp_embed_buf, last_hidden_normed, H * sizeof(float));
-        }
+        /* Position 0: project talker hidden (H_T) -> CP space (H_CP) */
+        mtp_project(ctx, ctx->cp_embed_buf, last_hidden_normed);
 
-        /* cb0 embedding (from talker's codec embedding) */
-        codec_embed_lookup(ctx, cb0, ctx->cp_embed_buf + H);
-
-        /* codec_sum accumulates all 16 codec embeddings */
-        float codec_sum[TTS_HIDDEN_SIZE];
-        memcpy(codec_sum, ctx->cp_embed_buf + H, H * sizeof(float)); /* start with cb0 embed */
+        /* Position 1: cb0 embedding from talker's codec table (H_T dim).
+         * Look up into tmp_embed, accumulate into codec_sum, then project for CP. */
+        codec_embed_lookup(ctx, cb0, ctx->tmp_embed);
+        memcpy(ctx->codec_sum_buf, ctx->tmp_embed, H_T * sizeof(float));
+        mtp_project(ctx, ctx->cp_embed_buf + H_CP, ctx->tmp_embed);
 
         int sub_seq_len = 2;
 
@@ -1101,25 +1128,25 @@ static int64_t *run_decode_loop(tts_native_ctx_t *ctx,
                                           temperature, top_k);
             step_codes[j + 1] = (int64_t)sub_tok;
 
-            /* Get sub-code embedding from code predictor's per-codebook table */
-            float sub_embed[TTS_HIDDEN_SIZE];
-            embed_lookup_bf16(sub_embed, cp->codec_embed_bf16[j],
-                              sub_tok, TTS_HIDDEN_SIZE);
+            /* Get sub-code embedding from code predictor's per-codebook table.
+             * These embeddings are in TALKER space (H_T dim). */
+            embed_lookup_bf16(ctx->tmp_embed, cp->codec_embed_bf16[j],
+                              sub_tok, H_T);
 
-            /* Append to code predictor input for next iteration */
-            memcpy(ctx->cp_embed_buf + sub_seq_len * H, sub_embed, H * sizeof(float));
+            /* Accumulate into codec_sum (talker space) */
+            qwen_add_inplace(ctx->codec_sum_buf, ctx->tmp_embed, H_T);
+
+            /* Project to CP space and append to code predictor input */
+            mtp_project(ctx, ctx->cp_embed_buf + sub_seq_len * H_CP, ctx->tmp_embed);
             sub_seq_len++;
-
-            /* Accumulate into codec_sum */
-            qwen_add_inplace(codec_sum, sub_embed, H);
         }
 
         /* ---- Build next decode step input ---- */
-        /* codec_sum += trailing text embed (or pad) */
+        /* codec_sum += trailing text embed (or pad), in talker space */
         if (step < trailing_seq_len) {
-            qwen_add_inplace(codec_sum, trailing_embed + step * H, H);
+            qwen_add_inplace(ctx->codec_sum_buf, trailing_embed + step * H_T, H_T);
         } else {
-            qwen_add_inplace(codec_sum, tts_pad_embed, H);
+            qwen_add_inplace(ctx->codec_sum_buf, tts_pad_embed, H_T);
         }
 
         n_steps++;
@@ -1127,7 +1154,7 @@ static int64_t *run_decode_loop(tts_native_ctx_t *ctx,
         if (step + 1 >= TTS_MAX_DECODE_STEPS) break;
 
         /* ---- Talker decode step ---- */
-        talker_forward(ctx, codec_sum, last_hidden_normed);
+        talker_forward(ctx, ctx->codec_sum_buf, last_hidden_normed);
         /* logits_buf and last_hidden_normed are now updated for next iteration */
 
         if (ctx->verbose && (step % 50 == 0 || step < 5)) {
@@ -1147,52 +1174,70 @@ static int64_t *run_decode_loop(tts_native_ctx_t *ctx,
  * ======================================================================== */
 
 #ifdef USE_CUBLAS
-static int upload_gpu_weights(tts_native_ctx_t *ctx) {
+static int upload_gpu_weights(tts_native_ctx_t *ctx, int fp16) {
     qwen_gpu_ctx_t *gpu = (qwen_gpu_ctx_t *)ctx->gpu_ctx;
     if (!gpu) return 0;
 
-    int dim = TTS_HIDDEN_SIZE;
+    /* Talker dimensions */
+    int dim_t = ctx->talker_config.dec_hidden;
+    int inter_t = ctx->talker_config.dec_intermediate;
     int q_dim = TTS_NUM_HEADS * TTS_HEAD_DIM;
     int kv_dim = TTS_NUM_KV_HEADS * TTS_HEAD_DIM;
-    int inter = TTS_INTERMEDIATE;
+
+    /* Code predictor dimensions */
+    int dim_cp = ctx->cp_config.dec_hidden;
+    int inter_cp = ctx->cp_config.dec_intermediate;
+
+    /* FP16 mode applies to talker + text projection only.
+     * Code predictor stays F32 — its sub-codebook predictions are
+     * quality-sensitive and it's only ~20% of total weight VRAM. */
+    if (fp16) {
+        if (ctx->verbose) printf("TTS native: FP16 mode — talker weights as FP16, code predictor as F32\n");
+        qwen_gpu_set_fp16_mode(gpu, 1);
+    }
 
     if (ctx->verbose) printf("TTS native: uploading talker weights to GPU...\n");
 
     for (int i = 0; i < TTS_TALKER_LAYERS; i++) {
         qwen_dec_layer_t *l = &ctx->talker.layers[i];
-        qwen_gpu_upload_weight_bf16(gpu, l->wq_weight_bf16, q_dim, dim);
-        qwen_gpu_upload_weight_bf16(gpu, l->wk_weight_bf16, kv_dim, dim);
-        qwen_gpu_upload_weight_bf16(gpu, l->wv_weight_bf16, kv_dim, dim);
-        qwen_gpu_upload_weight_bf16(gpu, l->wo_weight_bf16, dim, q_dim);
-        qwen_gpu_upload_weight_bf16(gpu, l->gate_up_fused_bf16, 2 * inter, dim);
-        qwen_gpu_upload_weight_bf16(gpu, l->down_weight_bf16, dim, inter);
+        qwen_gpu_upload_weight_bf16(gpu, l->wq_weight_bf16, q_dim, dim_t);
+        qwen_gpu_upload_weight_bf16(gpu, l->wk_weight_bf16, kv_dim, dim_t);
+        qwen_gpu_upload_weight_bf16(gpu, l->wv_weight_bf16, kv_dim, dim_t);
+        qwen_gpu_upload_weight_bf16(gpu, l->wo_weight_bf16, dim_t, q_dim);
+        qwen_gpu_upload_weight_bf16(gpu, l->gate_up_fused_bf16, 2 * inter_t, dim_t);
+        qwen_gpu_upload_weight_bf16(gpu, l->down_weight_bf16, dim_t, inter_t);
     }
 
     /* Codec head */
-    qwen_gpu_upload_weight_bf16(gpu, ctx->codec_head_bf16, TTS_TALKER_VOCAB, dim);
+    qwen_gpu_upload_weight_bf16(gpu, ctx->codec_head_bf16, TTS_TALKER_VOCAB, dim_t);
 
     /* Text projection */
     tts_text_project_t *tp = &ctx->text_project;
     qwen_gpu_upload_weight_bf16(gpu, tp->fc1_weight_bf16, tp->intermediate, TTS_TEXT_HIDDEN_SIZE);
-    qwen_gpu_upload_weight_bf16(gpu, tp->fc2_weight_bf16, dim, tp->intermediate);
+    qwen_gpu_upload_weight_bf16(gpu, tp->fc2_weight_bf16, dim_t, tp->intermediate);
 
-    /* Code predictor layers (5 layers) */
-    if (ctx->verbose) printf("TTS native: uploading code predictor weights to GPU...\n");
+    /* Turn off FP16 before code predictor upload */
+    if (fp16) {
+        qwen_gpu_set_fp16_mode(gpu, 0);
+    }
+
+    /* Code predictor layers (5 layers) — always F32 */
+    if (ctx->verbose) printf("TTS native: uploading code predictor weights to GPU (F32)...\n");
 
     for (int i = 0; i < TTS_CODEPRED_LAYERS; i++) {
         qwen_dec_layer_t *l = &ctx->code_pred.layers[i];
-        qwen_gpu_upload_weight_bf16(gpu, l->wq_weight_bf16, q_dim, dim);
-        qwen_gpu_upload_weight_bf16(gpu, l->wk_weight_bf16, kv_dim, dim);
-        qwen_gpu_upload_weight_bf16(gpu, l->wv_weight_bf16, kv_dim, dim);
-        qwen_gpu_upload_weight_bf16(gpu, l->wo_weight_bf16, dim, q_dim);
-        qwen_gpu_upload_weight_bf16(gpu, l->gate_up_fused_bf16, 2 * inter, dim);
-        qwen_gpu_upload_weight_bf16(gpu, l->down_weight_bf16, dim, inter);
+        qwen_gpu_upload_weight_bf16(gpu, l->wq_weight_bf16, q_dim, dim_cp);
+        qwen_gpu_upload_weight_bf16(gpu, l->wk_weight_bf16, kv_dim, dim_cp);
+        qwen_gpu_upload_weight_bf16(gpu, l->wv_weight_bf16, kv_dim, dim_cp);
+        qwen_gpu_upload_weight_bf16(gpu, l->wo_weight_bf16, dim_cp, q_dim);
+        qwen_gpu_upload_weight_bf16(gpu, l->gate_up_fused_bf16, 2 * inter_cp, dim_cp);
+        qwen_gpu_upload_weight_bf16(gpu, l->down_weight_bf16, dim_cp, inter_cp);
     }
 
-    /* Code predictor lm_heads (15 codebook-specific heads) */
+    /* Code predictor lm_heads (15 codebook-specific heads, in CP space) */
     for (int j = 0; j < TTS_NUM_CODE_GROUPS - 1; j++) {
         qwen_gpu_upload_weight_bf16(gpu, ctx->code_pred.lm_head_bf16[j],
-                                    TTS_CODEC_VOCAB, dim);
+                                    TTS_CODEC_VOCAB, dim_cp);
     }
 
     if (ctx->verbose) {
@@ -1208,7 +1253,7 @@ static int upload_gpu_weights(tts_native_ctx_t *ctx) {
  * ======================================================================== */
 
 int tts_native_init(tts_native_ctx_t *ctx, const char *model_dir,
-                    void *gpu_ctx, int verbose) {
+                    void *gpu_ctx, int fp16, int verbose) {
     memset(ctx, 0, sizeof(*ctx));
     ctx->verbose = verbose;
 
@@ -1216,6 +1261,7 @@ int tts_native_init(tts_native_ctx_t *ctx, const char *model_dir,
     ctx->gpu_ctx = gpu_ctx;
 #else
     (void)gpu_ctx;
+    (void)fp16;
 #endif
 
     double t_start = platform_time_ms();
@@ -1229,16 +1275,65 @@ int tts_native_init(tts_native_ctx_t *ctx, const char *model_dir,
         return -1;
     }
 
-    /* Set up talker config (identical to qwen-asr 0.6B decoder) */
-    ctx->talker_config.dec_hidden = TTS_HIDDEN_SIZE;
-    ctx->talker_config.dec_layers = TTS_TALKER_LAYERS;
-    ctx->talker_config.dec_heads = TTS_NUM_HEADS;
-    ctx->talker_config.dec_kv_heads = TTS_NUM_KV_HEADS;
-    ctx->talker_config.dec_head_dim = TTS_HEAD_DIM;
-    ctx->talker_config.dec_intermediate = TTS_INTERMEDIATE;
-    ctx->talker_config.vocab_size = TTS_TALKER_VOCAB;
-    ctx->talker_config.dec_rms_norm_eps = TTS_RMS_NORM_EPS;
-    ctx->talker_config.dec_rope_theta = TTS_ROPE_THETA;
+    /* Auto-detect model size from codec_embedding weight shape.
+     * 0.6B: codec_embedding shape = [3072, 1024] -> talker_hidden = 1024
+     * 1.7B: codec_embedding shape = [3072, 2048] -> talker_hidden = 2048 */
+    {
+        safetensors_file_t *sf_detect = NULL;
+        const safetensor_t *codec_emb_t = multi_safetensors_find(ctx->safetensors,
+            "talker.model.codec_embedding.weight", &sf_detect);
+        if (!codec_emb_t) {
+            fprintf(stderr, "TTS native: failed to find codec_embedding for model size detection\n");
+            goto fail;
+        }
+        int talker_hidden = (int)codec_emb_t->shape[1];
+
+        /* Detect talker intermediate from gate_proj shape */
+        const safetensor_t *gate_t = multi_safetensors_find(ctx->safetensors,
+            "talker.model.layers.0.mlp.gate_proj.weight", &sf_detect);
+        int talker_intermediate = gate_t ? (int)gate_t->shape[0] : talker_hidden * 3;
+
+        /* Detect CP dimensions from CP norm and gate_proj shapes */
+        const safetensor_t *cp_norm_t = multi_safetensors_find(ctx->safetensors,
+            "talker.code_predictor.model.norm.weight", &sf_detect);
+        int cp_hidden = cp_norm_t ? (int)cp_norm_t->shape[0] : 1024;
+
+        const safetensor_t *cp_gate_t = multi_safetensors_find(ctx->safetensors,
+            "talker.code_predictor.model.layers.0.mlp.gate_proj.weight", &sf_detect);
+        int cp_intermediate = cp_gate_t ? (int)cp_gate_t->shape[0] : 3072;
+
+        /* Set up talker config */
+        ctx->talker_config.dec_hidden = talker_hidden;
+        ctx->talker_config.dec_layers = TTS_TALKER_LAYERS;
+        ctx->talker_config.dec_heads = TTS_NUM_HEADS;
+        ctx->talker_config.dec_kv_heads = TTS_NUM_KV_HEADS;
+        ctx->talker_config.dec_head_dim = TTS_HEAD_DIM;
+        ctx->talker_config.dec_intermediate = talker_intermediate;
+        ctx->talker_config.vocab_size = TTS_TALKER_VOCAB;
+        ctx->talker_config.dec_rms_norm_eps = TTS_RMS_NORM_EPS;
+        ctx->talker_config.dec_rope_theta = TTS_ROPE_THETA;
+
+        /* Set up code predictor config */
+        ctx->cp_config.dec_hidden = cp_hidden;
+        ctx->cp_config.dec_layers = TTS_CODEPRED_LAYERS;
+        ctx->cp_config.dec_heads = TTS_NUM_HEADS;
+        ctx->cp_config.dec_kv_heads = TTS_NUM_KV_HEADS;
+        ctx->cp_config.dec_head_dim = TTS_HEAD_DIM;
+        ctx->cp_config.dec_intermediate = cp_intermediate;
+        ctx->cp_config.vocab_size = TTS_CODEC_VOCAB;
+        ctx->cp_config.dec_rms_norm_eps = TTS_RMS_NORM_EPS;
+        ctx->cp_config.dec_rope_theta = TTS_ROPE_THETA;
+
+        /* Speaker embedding dim matches talker hidden */
+        ctx->spk_embed_dim = talker_hidden;
+
+        if (verbose) {
+            const char *model_name = (talker_hidden == 1024) ? "0.6B" :
+                                     (talker_hidden == 2048) ? "1.7B" : "unknown";
+            printf("TTS native: detected %s model (talker_hidden=%d, cp_hidden=%d)\n",
+                   model_name, talker_hidden, cp_hidden);
+        }
+    }
 
     /* Load weights */
     if (load_talker_weights(ctx) != 0) goto fail;
@@ -1271,7 +1366,7 @@ int tts_native_init(tts_native_ctx_t *ctx, const char *model_dir,
             if (verbose) printf("TTS native: TTS_CPU_ONLY=1, skipping GPU upload\n");
             ctx->gpu_ctx = NULL;
         } else {
-            upload_gpu_weights(ctx);
+            upload_gpu_weights(ctx, fp16);
         }
     }
 #endif
@@ -1336,6 +1431,7 @@ void tts_native_free(tts_native_ctx_t *ctx) {
 
     /* Free misc buffers */
     free(ctx->cp_embed_buf);
+    free(ctx->codec_sum_buf);
     free(ctx->rope_cache_cos);
     free(ctx->rope_cache_sin);
     free(ctx->rope_inv_freq);
@@ -1415,6 +1511,26 @@ int tts_native_decode(tts_native_ctx_t *ctx, const char *text,
     if (ctx->verbose)
         printf("  TTS native: %d steps (%.1fs audio) in %.0f ms\n",
                n_steps, n_steps * 0.08, elapsed_ms);
+
+    /* Dump codec tokens to file if TTS_DUMP_CODES env var is set */
+    {
+        const char *dump_path = getenv("TTS_DUMP_CODES");
+        if (dump_path && dump_path[0]) {
+            FILE *fp = fopen(dump_path, "w");
+            if (fp) {
+                fprintf(fp, "# codec tokens: %d steps x %d groups\n", n_steps, TTS_NUM_CODE_GROUPS);
+                for (int s = 0; s < n_steps; s++) {
+                    for (int g = 0; g < TTS_NUM_CODE_GROUPS; g++) {
+                        if (g > 0) fprintf(fp, "\t");
+                        fprintf(fp, "%lld", (long long)codes[s * TTS_NUM_CODE_GROUPS + g]);
+                    }
+                    fprintf(fp, "\n");
+                }
+                fclose(fp);
+                printf("  TTS: dumped codec tokens to %s\n", dump_path);
+            }
+        }
+    }
 
     *codes_out = codes;
     *n_steps_out = n_steps;

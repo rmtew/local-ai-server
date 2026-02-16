@@ -7,7 +7,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 OpenAI-compatible local inference server for speech recognition (ASR) and text-to-speech (TTS), written in pure C with optional GPU acceleration. Cross-platform (Windows + Linux), single-threaded, designed for personal/local use.
 
 - **ASR:** Qwen3-ASR (0.6B / 1.7B) via `qwen-asr` git submodule
-- **TTS:** Qwen3-TTS (0.6B) with native C+cuBLAS decode and native C vocoder
+- **TTS:** Qwen3-TTS (0.6B / 1.7B) with native C+cuBLAS decode and native C vocoder. Model size auto-detected from weight shapes.
 
 ## Build
 
@@ -59,8 +59,11 @@ The Makefile also supports macOS (uses `-framework Accelerate` instead of OpenBL
 bin/local-ai-server.exe \
   --model=path/to/qwen3-asr-0.6b \
   --tts-model=path/to/qwen3-tts-12hz-0.6b-base \
-  --port=8090 --threads=4 --verbose
+  --port=8090 --threads=4 --fp16 --verbose
 ```
+
+- `--tts-model`: Supports both 0.6B and 1.7B models. Model size auto-detected. Both need the shared vocoder at `<tts-model>/../Qwen3-TTS-Tokenizer-12Hz/`.
+- `--fp16`: Store TTS talker weights as FP16 on GPU. VRAM savings: 0.6B 2136→1278 MB, 1.7B 5852→3136 MB. Code predictor stays F32 for audio quality. Uses `cublasGemmEx` with FP16 inputs, F32 accumulation. ASR weights are unaffected.
 
 TTS auto-locates vocoder weights as sibling directory: `<tts-model>/../Qwen3-TTS-Tokenizer-12Hz/model.safetensors`
 

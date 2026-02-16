@@ -14,36 +14,42 @@ All three stages run natively in C. The talker and code predictor use cuBLAS GPU
 
 ## Required Models
 
-Two model directories are needed, expected as siblings on disk:
+Both 0.6B and 1.7B model sizes are supported. Model size is auto-detected from weight shapes at startup. The vocoder is shared between both models.
 
 ```
 models/tts/
-  qwen3-tts-12hz-0.6b-base/     <-- passed via --tts-model
-    model.safetensors            (1.9 GB) -- talker + code predictor weights
-    config.json
-    vocab.json
-    merges.txt
-    tokenizer_config.json
-  Qwen3-TTS-Tokenizer-12Hz/     <-- auto-discovered as sibling
-    model.safetensors            (682 MB) -- vocoder weights
+  qwen3-tts-12hz-0.6b-base/     <-- 0.6B model (pass via --tts-model)
+    model.safetensors            (1.9 GB)
+    config.json, vocab.json, merges.txt, tokenizer_config.json
+  qwen3-tts-12hz-1.7b-base/     <-- 1.7B model (pass via --tts-model)
+    model.safetensors            (3.6 GB)
+    config.json, vocab.json, merges.txt, tokenizer_config.json
+  Qwen3-TTS-Tokenizer-12Hz/     <-- shared vocoder (auto-discovered as sibling)
+    model.safetensors            (682 MB)
 ```
 
-The server expects both directories. The vocoder weights are discovered at `<tts-model-dir>/../Qwen3-TTS-Tokenizer-12Hz/model.safetensors`.
+### Architecture Differences
+
+| Parameter | 0.6B | 1.7B |
+|-----------|------|------|
+| Talker hidden size | 1024 | 2048 |
+| Talker intermediate (FFN) | 3072 | 6144 |
+| Talker layers / heads / KV heads | 28 / 16 / 8 | 28 / 16 / 8 |
+| Code predictor (all dims) | 1024 / 5 layers | 1024 / 5 layers |
+| Speaker encoder embed dim | 1024 | 2048 |
+| Text hidden size | 2048 | 2048 |
+| Head dim / RoPE theta | 128 / 1M | 128 / 1M |
+
+The code predictor is identical between models. The 1.7B model uses `small_to_mtp_projection` (Linear(2048, 1024)) to bridge talker outputs to code predictor inputs. For 0.6B, this projection is identity (same hidden size).
 
 ### Downloading Models
 
-All models can be downloaded with the included script:
+Models from HuggingFace:
 
-```bash
-# Requires DEPS_ROOT environment variable
-bash tools/download_tts_models.sh
-```
-
-This downloads everything needed for native inference:
-
-- `model.safetensors` (1.9 GB) from [`Qwen/Qwen3-TTS-12Hz-0.6B-Base`](https://huggingface.co/Qwen/Qwen3-TTS-12Hz-0.6B-Base) -- talker + code predictor + speaker encoder weights
-- `model.safetensors` (682 MB) from [`Qwen/Qwen3-TTS-Tokenizer-12Hz`](https://huggingface.co/Qwen/Qwen3-TTS-Tokenizer-12Hz) -- vocoder weights
-- Tokenizer files (vocab.json, merges.txt, etc.) from [`zukky/Qwen3-TTS-ONNX-DLL`](https://huggingface.co/zukky/Qwen3-TTS-ONNX-DLL)
+- **0.6B**: [`Qwen/Qwen3-TTS-12Hz-0.6B-Base`](https://huggingface.co/Qwen/Qwen3-TTS-12Hz-0.6B-Base) -- `model.safetensors` (1.9 GB)
+- **1.7B**: [`Qwen/Qwen3-TTS-12Hz-1.7B-Base`](https://huggingface.co/Qwen/Qwen3-TTS-12Hz-1.7B-Base) -- `model.safetensors` (3.6 GB)
+- **Vocoder**: [`Qwen/Qwen3-TTS-Tokenizer-12Hz`](https://huggingface.co/Qwen/Qwen3-TTS-Tokenizer-12Hz) -- `model.safetensors` (682 MB)
+- Tokenizer files (vocab.json, merges.txt) from [`zukky/Qwen3-TTS-ONNX-DLL`](https://huggingface.co/zukky/Qwen3-TTS-ONNX-DLL)
 
 ## Pipeline Architecture
 
@@ -54,16 +60,18 @@ Input text is tokenized using the Qwen2 BPE tokenizer (151,643 tokens). Token em
 ### Stage 2: Talker LM (Native C + cuBLAS)
 
 A 28-layer Qwen3 transformer generates codec tokens autoregressively:
-- Hidden size: 1024, 16 attention heads, GQA with 4 KV heads
+- Hidden size: 1024 (0.6B) or 2048 (1.7B), 16 attention heads, GQA with 8 KV heads, head_dim=128
 - Sampling: top-k (k=50) with temperature 0.9 (configurable) and repetition penalty 1.05
 - Each step produces one first-codebook token (from vocabulary of 2048)
 
-Implementation: `src/tts_native.c` (~1900 lines). Weights loaded from `model.safetensors` (BF16, converted to FP32 at load). KV cache maintained across steps.
+Implementation: `src/tts_native.c` (~2100 lines). Weights loaded from `model.safetensors` (BF16, converted to F32 at load, or FP16 with `--fp16`). Model size auto-detected from weight shapes. KV cache maintained across steps.
 
 ### Stage 3: Code Predictor (Native C + cuBLAS)
 
 For each talker step, a 5-layer transformer predicts 15 additional sub-codebook tokens:
-- Hidden size: 1024, 16 heads
+- Hidden size: 1024 (always, for both 0.6B and 1.7B), 16 heads
+- For 1.7B: `small_to_mtp_projection` bridges talker (2048-dim) to code predictor (1024-dim)
+- Code predictor codec embeddings are in talker space for codec_sum feedback
 - One forward pass per sub-code, with the growing sequence of prior sub-codes as input
 
 Total output: `[n_steps, 16]` int64 codec tokens.
@@ -114,32 +122,97 @@ Total upsample factor: 2 * 2 * 8 * 5 * 4 * 3 = 1920x (12.5 Hz codec rate to 24 k
 
 ## Performance
 
-Benchmarks on an RTX 3080 + i7-10700K system. Times vary with input length.
+All benchmarks on RTX 3070 Laptop GPU (8192 MB VRAM, compute 8.6) with cuBLAS + custom CUDA kernels. Inference is single-threaded with `seed` for deterministic output. Median of 3 runs after warmup.
 
-### Short sentence (~1 second of audio, ~11 codec steps)
+### GPU VRAM Usage
 
-| Stage | Time |
-|-------|------|
-| Talker decode (GPU) | ~1.6s |
-| Native vocoder (CPU) | ~10.1s |
-| **Total** | ~11.7s |
+| Model | Mode | Weights | VRAM | Model load time |
+|-------|------|---------|------|-----------------|
+| 0.6B | F32 | 216 F32 | **2136 MB** | 3.7s |
+| 0.6B | `--fp16` | 171 FP16 + 45 F32 | **1278 MB** | 3.9s |
+| 1.7B | F32 | 216 F32 | **5852 MB** | 13.8s |
+| 1.7B | `--fp16` | 171 FP16 + 45 F32 | **3136 MB** | 19.4s |
 
-### Medium sentence (~2 seconds of audio, ~24 codec steps)
+With `--fp16`, **talker weights** (28 layers, codec head, text projection = 171 weights) are stored as FP16 on GPU, using `cublasGemmEx` with FP16 inputs, F32 accumulation, and F32 output. **Code predictor weights** (5 layers + 15 lm_heads = 45 weights) remain F32 — sub-codebook predictions are quality-sensitive and storing them as FP16 causes audible artifacts.
 
-| Stage | Time |
-|-------|------|
-| Talker decode (GPU) | ~3.5s |
-| Native vocoder (CPU) | ~25s |
-| **Total** | ~29s |
+Both 0.6B and 1.7B models fit on the 8 GB GPU in all modes. The 1.7B F32 uses 5.9 GB, leaving headroom for KV cache and buffers. FP16 is primarily useful for running alongside other GPU workloads or on smaller VRAM GPUs.
 
-The vocoder is the bottleneck -- BigVGAN Conv1d operations account for ~96% of vocoder time. Further optimization with AVX2/SSE vectorization and BLAS-accelerated convolutions is planned.
+### End-to-End Inference Timing
+
+Wall-clock time including talker decode (GPU), code predictor (GPU), vocoder (CPU), and WAV encoding. Measured with `seed=42` for determinism.
+
+| Text | 0.6B F32 | 0.6B FP16 | 1.7B F32 | 1.7B FP16 |
+|------|----------|-----------|----------|-----------|
+| Short: "Hello world." | **1.8s** | 2.2s | 2.8s | 2.2s |
+| Medium: "The quick brown fox..." (63 chars) | **6.0s** | 7.4s | 7.8s | 9.0s |
+| Long: Douglas Adams quote (256 chars) | **7.1s** | 7.7s | 8.4s | 9.9s |
+
+Notes:
+- 0.6B F32 is fastest overall — the FP16 CPU-side activation conversion overhead can outweigh VRAM savings
+- 1.7B is ~30-40% slower than 0.6B for medium/long text
+- Long text hits the 50-step decode limit (~4s audio) in all configurations
+- Vocoder time is identical across models (same vocoder, same codec format)
+
+## Quality Comparison (0.6B vs 1.7B)
+
+Subjective listening comparison across 5 text types (greeting, narrative, technical, expressive, question) using default voice (no speaker embedding), `seed=42`, `--fp16`.
+
+| Text type | 0.6B | 1.7B |
+|-----------|------|------|
+| Greeting ("Hello world") | Good | Good |
+| Narrative (lighthouse keeper, 170 chars) | Good | Background noise/static |
+| Technical (neural network description) | Good | Background noise/static |
+| Expressive (exclamations, questions) | Good | No noise, but reverb-like room ambience |
+| Question (philosophical) | Good | Good |
+
+The 1.7B noise is seed-dependent: seeds 42 and 999 produced audible noise, while seeds 7 and 123 were clean. The 0.6B model was clean on all tested seeds.
+
+### Codec Token Analysis
+
+To determine whether the noise is a code bug or model characteristic, codec tokens were dumped and compared across seeds and models using `TTS_DUMP_CODES` env var (added to `tts_native.c`).
+
+| Metric | 1.7B noisy (seed 42) | 1.7B clean (seed 7) | 0.6B clean (seed 42) |
+|--------|---------------------|---------------------|---------------------|
+| CB0 mean / std | 939 / 657 | 1069 / 611 | 1075 / 662 |
+| Sub-code mean / std | 928 / 578 | 936 / 581 | 942 / 588 |
+| Per-group entropy | 5.2-5.6 bits | 5.5-5.6 bits | 5.6 bits |
+| Unique CB0 tokens | 49/50 | 49/50 | 46/50 |
+| Anomalies (stuck/max-val) | None | None | None |
+
+All token distributions are statistically indistinguishable. No anomalous patterns in noisy seeds.
+
+Additionally, the `small_to_mtp_projection` math was verified with numpy against the safetensors weights (`tools/verify_mtp_projection.py`). All tensor shapes, projection dimensions, and numerical results match expected values.
+
+### Conclusion
+
+The noise is a **model characteristic**, not an implementation bug:
+- MTP projection math verified correct (weight [1024, 2048] + bias [1024])
+- All tensor shapes match (CP codec_embed [2048, 2048] in talker space, lm_head [2048, 1024] in CP space)
+- F32 mode produces the same noise (not an FP16 artifact)
+- Codec token distributions are identical between noisy/clean seeds
+- Noise is seed-dependent (2/4 seeds), suggesting certain token *sequences* cause the shared vocoder to render reverb-like artifacts
+
+### Debugging Tools
+
+- `TTS_DUMP_CODES=<path>` env var: dumps codec tokens to a TSV file (one row per step, 16 tab-separated values)
+- `tools/verify_mtp_projection.py`: verifies MTP projection shapes and math using numpy + safetensors (no PyTorch)
+- `tools/compare_codec_tokens.py`: compares codec token distributions across dump files (entropy, anomaly checks, pairwise overlap)
+
+## Future Work
+
+- **In-context voice cloning** (`x_vector_only_mode=False`): Prepend reference audio codec tokens and transcript to the input sequence for higher quality cloning. Currently only x-vector mode is implemented.
+- **1.7B quality investigation**: The 1.7B Base model produces occasional reverb/noise on some seeds. Could investigate: lower temperature sampling, different top-k values, or the Instruct model variant which may have better quality tuning.
+- **Instruct model variants**: Qwen also provides `0.6B-Instruct` and `1.7B-Instruct` models which may have different quality characteristics. These use a chat-template prompt format and could be worth testing.
+- **Longer audio**: Current 50-step decode limit produces ~4s audio. Increasing this would require longer KV cache and may affect quality for very long sequences.
+- **Vocoder GPU acceleration**: The vocoder currently runs on CPU (OpenBLAS). Moving convolutions to GPU (cuBLAS or custom CUDA kernels) could significantly reduce total inference time, especially for longer audio.
+- **Streaming output**: Generate and send audio chunks as decode steps complete, rather than waiting for the full sequence.
 
 ## Source Files
 
 | File | Lines | Purpose |
 |------|-------|---------|
 | `tts_pipeline.c` | ~290 | Pipeline orchestration, WAV encoding |
-| `tts_native.c` | ~1900 | Native talker LM + code predictor (C + cuBLAS) |
+| `tts_native.c` | ~1520 | Native talker LM + code predictor (C + cuBLAS) |
 | `tts_vocoder.c` | ~870 | Vocoder pipeline, weight loading, RVQ decode, buffer management |
 | `tts_vocoder_ops.c` | ~230 | Conv1d, ConvTranspose1d, SnakeBeta, LayerNorm, GELU |
 | `tts_vocoder_xfmr.c` | ~240 | 8-layer pre-transformer |
@@ -148,13 +221,13 @@ The vocoder is the bottleneck -- BigVGAN Conv1d operations account for ~96% of v
 
 ## Voice Cloning
 
-Our model IS the Base variant (`Qwen3-TTS-12Hz-0.6B-Base`), which includes 76 `speaker_encoder.*` tensors (~17 MB ECAPA-TDNN) alongside the talker and code predictor weights. Voice cloning uses precomputed speaker embeddings stored in `voice_presets.bin`.
+Both Base model variants (0.6B-Base and 1.7B-Base) include 76 `speaker_encoder.*` tensors (ECAPA-TDNN) alongside the talker and code predictor weights. Voice cloning uses precomputed speaker embeddings stored in `voice_presets.bin`. The embed dim is 1024 (0.6B) or 2048 (1.7B) — preset files are model-specific.
 
 ### How It Works
 
 The [qwen-tts Python package](https://github.com/QwenLM/Qwen3-TTS) supports two voice cloning modes:
 
-1. **X-vector only** (`x_vector_only_mode=True`): Reference audio is processed through the speaker encoder to produce a 1024-dim embedding. This embedding is inserted as a single extra token in the talker LM's input sequence. No reference text needed. **This is the mode we implement.**
+1. **X-vector only** (`x_vector_only_mode=True`): Reference audio is processed through the speaker encoder to produce a speaker embedding (1024-dim for 0.6B, 2048-dim for 1.7B). This embedding is inserted as a single extra token in the talker LM's input sequence. No reference text needed. **This is the mode we implement.**
 
 2. **Full in-context learning** (`x_vector_only_mode=False`): Reference audio is tokenized through the codec, reference text is encoded, and both are prepended to the input alongside the speaker embedding. Higher quality, requires reference transcript. Not yet implemented.
 
@@ -181,12 +254,12 @@ MFA: concat(block1,block2,block3) -> Conv1d(1536->1536, k=1) + ReLU
 ASP: Attentive Statistics Pooling (attention-weighted mean + std)
   |
   v
-FC: Conv1d(3072->1024, k=1) -> 1024-dim speaker embedding
+FC: Conv1d(3072->embed_dim, k=1) -> speaker embedding (1024 or 2048 dim)
 ```
 
 ### Speaker Embedding Injection
 
-The 1024-dim embedding is inserted as a single token between the two parts of the codec prefix in `build_prefill_embeddings()`:
+The speaker embedding is inserted as a single token between the two parts of the codec prefix in `build_prefill_embeddings()`:
 
 ```
 Without speaker:  [think, think_bos, lang_id, think_eos, pad, bos]
@@ -197,9 +270,10 @@ Text side pairs the speaker position with a `tts_pad` embedding. Prefill length 
 
 ### Voice Presets
 
-Precomputed 1024-dim embeddings stored in `<tts-model-dir>/voice_presets.bin`. Loaded at startup by `tts_voice_presets.c`. The `voice` parameter in the API selects a preset by name.
+Precomputed speaker embeddings stored in `<tts-model-dir>/voice_presets.bin`. Embed dim is auto-detected from file size (1024 for 0.6B, 2048 for 1.7B). Preset files are model-specific and must match the loaded model's embed dim. The `voice` parameter in the API selects a preset by name.
 
 Generate presets from reference WAV files:
 ```bash
-python tools/generate_voice_presets.py --samples-dir voice_samples/ --output voice_presets.bin
+C:/Data/R/git/claude-repos/local-ai-server/build.bat presets
+bin/voice_presets --model <tts-model-dir> --samples voice_samples/ --output voice_presets.bin
 ```

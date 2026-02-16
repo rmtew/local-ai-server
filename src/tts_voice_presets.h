@@ -3,8 +3,9 @@
  *
  * Binary file format:
  *   [n:int32] count of presets
- *   n x [name:64 bytes (null-padded), embed:1024 x float32]
+ *   n x [name:64 bytes (null-padded), embed:embed_dim x float32]
  *
+ * embed_dim is auto-detected from file size: 1024 (0.6B) or 2048 (1.7B).
  * File location: <tts-model-dir>/voice_presets.bin
  * Missing file is not an error (just no presets available).
  */
@@ -13,16 +14,12 @@
 #define LOCAL_AI_TTS_VOICE_PRESETS_H
 
 #define TTS_PRESET_NAME_LEN     64
-#define TTS_PRESET_EMBED_DIM    1024
 
 typedef struct {
-    char name[TTS_PRESET_NAME_LEN];
-    float embed[TTS_PRESET_EMBED_DIM];
-} tts_voice_preset_t;
-
-typedef struct {
-    tts_voice_preset_t *presets;
+    char *names;        /* [n_presets * TTS_PRESET_NAME_LEN], null-padded */
+    float *embeds;      /* [n_presets * embed_dim] */
     int n_presets;
+    int embed_dim;      /* 1024 or 2048, detected from file */
 } tts_voice_presets_t;
 
 /* Load voice presets from binary file.
@@ -34,7 +31,7 @@ int tts_voice_presets_load(tts_voice_presets_t *vp, const char *path);
 void tts_voice_presets_free(tts_voice_presets_t *vp);
 
 /* Find a preset by name (case-insensitive).
- * Returns pointer to 1024-dim embedding, or NULL if not found. */
+ * Returns pointer to embed_dim-dim embedding, or NULL if not found. */
 const float *tts_voice_presets_find(const tts_voice_presets_t *vp, const char *name);
 
 #endif /* LOCAL_AI_TTS_VOICE_PRESETS_H */

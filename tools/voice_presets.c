@@ -52,7 +52,7 @@ volatile int g_shutdown = 0;
 
 #define MAX_CLIPS       256
 #define MAX_VOICES      64
-#define EMBED_DIM       1024
+#define MAX_EMBED_DIM   2048    /* max possible embed dim (1.7B model) */
 #define COSINE_PRUNE_THRESHOLD  0.75f
 #define STABILITY_THRESHOLD     0.05f
 
@@ -422,49 +422,49 @@ static int do_extract(const char *input, const char *name,
 
 typedef struct {
     char name[TTS_PRESET_NAME_LEN];
-    float embeddings[MAX_CLIPS][EMBED_DIM];
+    float embeddings[MAX_CLIPS][MAX_EMBED_DIM];
     int n_clips;
     int used[MAX_CLIPS];        /* 1 = kept, 0 = pruned */
-    float avg_embed[EMBED_DIM]; /* final averaged embedding */
+    float avg_embed[MAX_EMBED_DIM]; /* final averaged embedding */
     float stability_score;      /* leave-one-out stability */
     float roundtrip_sim;        /* cosine sim after round-trip verification */
 } voice_data_t;
 
 /* Compute centroid of kept embeddings */
-static void compute_centroid(voice_data_t *v) {
-    memset(v->avg_embed, 0, sizeof(v->avg_embed));
+static void compute_centroid(voice_data_t *v, int embed_dim) {
+    memset(v->avg_embed, 0, (size_t)embed_dim * sizeof(float));
     int count = 0;
     for (int i = 0; i < v->n_clips; i++) {
         if (!v->used[i]) continue;
-        for (int d = 0; d < EMBED_DIM; d++) {
+        for (int d = 0; d < embed_dim; d++) {
             v->avg_embed[d] += v->embeddings[i][d];
         }
         count++;
     }
     if (count > 0) {
-        for (int d = 0; d < EMBED_DIM; d++) {
+        for (int d = 0; d < embed_dim; d++) {
             v->avg_embed[d] /= count;
         }
     }
 }
 
 /* Prune outlier clips: drop any with cosine sim to centroid below threshold */
-static int prune_outliers(voice_data_t *v) {
+static int prune_outliers(voice_data_t *v, int embed_dim) {
     /* Mark all clips as used first */
     for (int i = 0; i < v->n_clips; i++) v->used[i] = 1;
 
     if (v->n_clips <= 1) {
-        compute_centroid(v);
+        compute_centroid(v, embed_dim);
         return 0;
     }
 
     /* First pass: compute centroid of all clips */
-    compute_centroid(v);
+    compute_centroid(v, embed_dim);
 
     /* Second pass: prune outliers */
     int pruned = 0;
     for (int i = 0; i < v->n_clips; i++) {
-        float sim = cosine_sim(v->embeddings[i], v->avg_embed, EMBED_DIM);
+        float sim = cosine_sim(v->embeddings[i], v->avg_embed, embed_dim);
         if (sim < COSINE_PRUNE_THRESHOLD) {
             v->used[i] = 0;
             pruned++;
@@ -475,14 +475,14 @@ static int prune_outliers(voice_data_t *v) {
 
     /* Recompute centroid with remaining clips */
     if (pruned > 0) {
-        compute_centroid(v);
+        compute_centroid(v, embed_dim);
     }
 
     return pruned;
 }
 
 /* Leave-one-out stability: how much does removing any single clip change the average? */
-static float check_convergence(voice_data_t *v) {
+static float check_convergence(voice_data_t *v, int embed_dim) {
     int kept = 0;
     for (int i = 0; i < v->n_clips; i++) {
         if (v->used[i]) kept++;
@@ -495,22 +495,22 @@ static float check_convergence(voice_data_t *v) {
         if (!v->used[leave]) continue;
 
         /* Compute centroid without this clip */
-        float loo_embed[EMBED_DIM];
-        memset(loo_embed, 0, sizeof(loo_embed));
+        float loo_embed[MAX_EMBED_DIM];
+        memset(loo_embed, 0, (size_t)embed_dim * sizeof(float));
         int count = 0;
         for (int i = 0; i < v->n_clips; i++) {
             if (!v->used[i] || i == leave) continue;
-            for (int d = 0; d < EMBED_DIM; d++) {
+            for (int d = 0; d < embed_dim; d++) {
                 loo_embed[d] += v->embeddings[i][d];
             }
             count++;
         }
-        for (int d = 0; d < EMBED_DIM; d++) {
+        for (int d = 0; d < embed_dim; d++) {
             loo_embed[d] /= count;
         }
 
         /* Measure change from full centroid */
-        float sim = cosine_sim(loo_embed, v->avg_embed, EMBED_DIM);
+        float sim = cosine_sim(loo_embed, v->avg_embed, embed_dim);
         float change = 1.0f - sim;
         if (change > max_change) max_change = change;
     }
@@ -519,7 +519,8 @@ static float check_convergence(voice_data_t *v) {
 }
 
 /* Write voice_presets.bin */
-static int write_presets_bin(const char *path, voice_data_t *voices, int n_voices) {
+static int write_presets_bin(const char *path, voice_data_t *voices, int n_voices,
+                             int embed_dim) {
     FILE *f = fopen(path, "wb");
     if (!f) {
         fprintf(stderr, "Cannot write to %s\n", path);
@@ -536,8 +537,8 @@ static int write_presets_bin(const char *path, voice_data_t *voices, int n_voice
         strncpy(name_buf, voices[i].name, TTS_PRESET_NAME_LEN - 1);
         fwrite(name_buf, 1, TTS_PRESET_NAME_LEN, f);
 
-        /* Embedding: 1024 floats */
-        fwrite(voices[i].avg_embed, sizeof(float), EMBED_DIM, f);
+        /* Embedding: embed_dim floats */
+        fwrite(voices[i].avg_embed, sizeof(float), embed_dim, f);
     }
 
     fclose(f);
@@ -628,7 +629,8 @@ static int do_generate(const char *model_dir, const char *samples_dir,
         free(voices);
         return 1;
     }
-    printf("Speaker encoder loaded OK\n\n");
+    int embed_dim = enc.embed_dim;
+    printf("Speaker encoder loaded OK (embed_dim=%d)\n\n", embed_dim);
 
     /* Process each voice */
     for (int v = 0; v < n_voices; v++) {
@@ -713,7 +715,7 @@ static int do_generate(const char *model_dir, const char *samples_dir,
 
             /* Compute embedding norm for diagnostics */
             float norm = 0;
-            for (int d = 0; d < EMBED_DIM; d++) {
+            for (int d = 0; d < embed_dim; d++) {
                 norm += voices[v].embeddings[clip_idx][d] * voices[v].embeddings[clip_idx][d];
             }
             norm = sqrtf(norm);
@@ -722,7 +724,7 @@ static int do_generate(const char *model_dir, const char *samples_dir,
             if (verbose) {
                 float mn = voices[v].embeddings[clip_idx][0];
                 float mx = mn;
-                for (int d = 1; d < EMBED_DIM; d++) {
+                for (int d = 1; d < embed_dim; d++) {
                     float val = voices[v].embeddings[clip_idx][d];
                     if (val < mn) mn = val;
                     if (val > mx) mx = val;
@@ -746,7 +748,7 @@ static int do_generate(const char *model_dir, const char *samples_dir,
         }
 
         /* Prune outliers */
-        int pruned = prune_outliers(&voices[v]);
+        int pruned = prune_outliers(&voices[v], embed_dim);
 
         int kept = 0;
         for (int i = 0; i < voices[v].n_clips; i++) {
@@ -761,7 +763,7 @@ static int do_generate(const char *model_dir, const char *samples_dir,
         printf("  Clips: %d used, %d pruned\n", kept, pruned);
 
         /* Check convergence (leave-one-out stability) */
-        voices[v].stability_score = check_convergence(&voices[v]);
+        voices[v].stability_score = check_convergence(&voices[v], embed_dim);
         printf("  Stability: %.4f", voices[v].stability_score);
         if (voices[v].stability_score > STABILITY_THRESHOLD) {
             printf(" (WARNING: >%.0f%% — consider adding more clips)", STABILITY_THRESHOLD * 100);
@@ -778,7 +780,7 @@ static int do_generate(const char *model_dir, const char *samples_dir,
                 for (int j = i + 1; j < voices[v].n_clips; j++) {
                     if (!voices[v].used[j]) continue;
                     float sim = cosine_sim(voices[v].embeddings[i],
-                                           voices[v].embeddings[j], EMBED_DIM);
+                                           voices[v].embeddings[j], embed_dim);
                     printf("    clip %d vs %d: %.4f\n", i + 1, j + 1, sim);
                 }
             }
@@ -822,7 +824,7 @@ static int do_generate(const char *model_dir, const char *samples_dir,
     }
 
     /* Write presets (before round-trip, so we have a file to load) */
-    if (write_presets_bin(preset_path, voices, n_voices) != 0) {
+    if (write_presets_bin(preset_path, voices, n_voices, embed_dim) != 0) {
         free(voices);
         return 1;
     }
@@ -836,7 +838,7 @@ static int do_generate(const char *model_dir, const char *samples_dir,
         qwen_set_threads(4);
 
         TtsPipeline tts;
-        if (tts_pipeline_init(&tts, model_dir, verbose) != 0) {
+        if (tts_pipeline_init(&tts, model_dir, 0, verbose) != 0) {
             fprintf(stderr, "WARNING: Failed to init TTS pipeline, skipping round-trip\n");
         } else {
             const char *test_sentence = "The quick brown fox jumps over the lazy dog.";
@@ -874,13 +876,13 @@ static int do_generate(const char *model_dir, const char *samples_dir,
                     if (mel && n_frames > 0) {
                         /* Need speaker encoder again for round-trip.
                          * The pipeline has one internally. */
-                        float rt_embed[EMBED_DIM];
+                        float rt_embed[MAX_EMBED_DIM];
                         int enc_rc = tts_speaker_enc_forward(
                             &tts.native->speaker_enc, mel, n_frames, rt_embed);
                         free(mel);
 
                         if (enc_rc == 0) {
-                            float sim = cosine_sim(voices[v].avg_embed, rt_embed, EMBED_DIM);
+                            float sim = cosine_sim(voices[v].avg_embed, rt_embed, embed_dim);
                             voices[v].roundtrip_sim = sim;
 
                             const char *quality;
@@ -943,21 +945,22 @@ static int do_list(const char *preset_path) {
         return 1;
     }
 
-    printf("%d preset%s in %s:\n\n", vp.n_presets, vp.n_presets > 1 ? "s" : "", preset_path);
+    printf("%d preset%s in %s (embed_dim=%d):\n\n", vp.n_presets,
+           vp.n_presets > 1 ? "s" : "", preset_path, vp.embed_dim);
     printf("%-20s  %10s  %24s\n", "Name", "Norm", "Range");
     printf("%-20s  %10s  %24s\n", "----", "----", "-----");
 
     for (int i = 0; i < vp.n_presets; i++) {
-        float *e = vp.presets[i].embed;
+        const float *e = vp.embeds + i * vp.embed_dim;
         float norm = 0, mn = e[0], mx = e[0];
-        for (int d = 0; d < EMBED_DIM; d++) {
+        for (int d = 0; d < vp.embed_dim; d++) {
             norm += e[d] * e[d];
             if (e[d] < mn) mn = e[d];
             if (e[d] > mx) mx = e[d];
         }
         norm = sqrtf(norm);
         printf("%-20s  %10.4f  [%10.4f, %10.4f]\n",
-               vp.presets[i].name, norm, mn, mx);
+               vp.names + i * TTS_PRESET_NAME_LEN, norm, mn, mx);
     }
 
     tts_voice_presets_free(&vp);
