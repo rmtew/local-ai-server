@@ -159,3 +159,75 @@ The 3 F32 weights are encoder weights (loaded from F32 safetensors). All 336 dec
 
 **Trade-off:** 40% VRAM reduction (3655→2182 MB) for ~2x slower decode. Total ASR time (including encoder, which is unchanged) goes from ~0.08x to ~0.15x RTF — still 6-7x faster than real-time. Worthwhile when VRAM is scarce (e.g. running both ASR + TTS 1.7B simultaneously).
 
+---
+
+## 2026-02-17 — FP16 On-Device Dequantization (CUDA 13.1)
+
+**Change:** Replace the FP16 CPU decoder fallback with on-device FP16→F32 dequantization. Weights stay as FP16 on GPU (VRAM savings preserved), but are dequantized into a scratch buffer before each GEMM, allowing standard `cublasSgemm` (F32×F32). The full GPU decoder is now used for both F32 and FP16 modes.
+
+**Config:** Qwen3-ASR-0.6B, 4 threads, RTX 3070 Laptop GPU, CUDA 13.1, `--fp16-asr`
+
+### Approach
+
+The previous FP16 approach failed because FP16×FP16 GEMMs compound precision errors through 28 decoder layers when combined with CUDA kernel numeric variance (RMSNorm, RoPE, SwiGLU), producing garbage tokens. The CPU fallback worked but was ~2x slower.
+
+**Solution:** On-device dequantization eliminates this problem:
+1. Store weights as FP16 on GPU (same VRAM savings as before)
+2. Before each GEMM, launch a CUDA kernel (`qwen_f16_to_f32`) that converts the FP16 weight tile to F32 in a pre-allocated scratch buffer
+3. Run standard `cublasSgemm` with F32 weights × F32 activations
+4. No activation precision loss, no PCIe round-trips, full GPU decoder stays enabled
+
+### VRAM Impact (0.6B)
+
+| Component | Size |
+|-----------|------|
+| FP16 weights on device | 2182 MB (unchanged from FP16 mode) |
+| Dequant scratch buffer | ~25 MB (gate_up_fused: 2 × intermediate × hidden) |
+| **Total** | **~2207 MB** |
+| **Savings vs F32** | **~1448 MB (40%)** |
+
+The lm_head (151936 × 1024 = 593 MB F32) is tiled through the 25 MB scratch buffer in ~25 chunks. Per-layer GEMMs dequant in a single shot (all fit within the scratch buffer).
+
+### Performance (median of 5 runs, 2 warmup, CUDA 13.1)
+
+| Mode | test_speech.wav | | jfk.wav | |
+|------|-----:|-----:|-----:|-----:|
+| | Decode | Total | Decode | Total |
+| F32 (full GPU decoder) | 314ms | 398ms | 709ms | 951ms |
+| FP16 (dequant + cublasSgemm) | 673ms | 771ms | 1328ms | 1599ms |
+| FP16 (fused scalar matvec) | 469ms | 558ms | 1036ms | 1284ms |
+| FP16 (fused vectorized matvec) | 418ms | 521ms | 885ms | 1137ms |
+
+Transcription: all modes produce identical, correct output.
+
+### Dequant-only analysis (intermediate step)
+
+The dequant approach was **~2x slower for decode** than F32. Root cause: memory bandwidth.
+
+- **F32 matvec:** read 4 bytes/element from weight → GEMM (bandwidth-limited for M=1)
+- **FP16 dequant matvec:** read 2 bytes (FP16) + write 4 bytes (F32 scratch) + read 4 bytes (F32 for GEMM) = 10 bytes/element, **2.5× the bandwidth**
+
+### Fused matvec kernel
+
+Replaced dequant+cublasSgemm with a custom CUDA kernel (`qwen_fp16_matvec_f32`) for M=1 decode:
+
+1. One block per output element (N blocks, 256 threads each)
+2. Activation vector loaded into shared memory (cooperative via 128-bit float4 loads, L2-cached across blocks)
+3. Each thread reads FP16 weight elements via 128-bit uint4 loads (8 FP16 per load), converts to F32 in registers using branchless bit manipulation, multiplies by cached activation, accumulates
+4. Block-level reduction → single output element
+
+Bandwidth: **2 bytes/element** (FP16 weight read only — half of F32's 4 bytes/element).
+
+### Optimization progression
+
+| | test_speech.wav Decode | jfk.wav Decode |
+|---|---:|---:|
+| Dequant → scalar fused | **-30%** (673→469ms) | **-22%** (1328→1036ms) |
+| Scalar → vectorized fused | **-11%** (469→418ms) | **-15%** (1036→885ms) |
+| **Total: dequant → vectorized** | **-38%** (673→418ms) | **-33%** (1328→885ms) |
+| Vectorized fused vs F32 | **+33%** (314→418ms) | **+25%** (709→885ms) |
+
+The vectorized kernel narrows the gap with F32 cuBLAS to **~30% overhead** (down from ~50% scalar, ~100% dequant). The remaining gap is cuBLAS's highly tuned memory access patterns and instruction scheduling for bandwidth-limited matvecs.
+
+**Trade-off summary:** 40% VRAM savings (3655→2207 MB) for ~30% slower decode. RTF 0.10-0.14x (7-10× real-time). The dequant+cublasSgemm path remains as fallback for M>1 (not used in the decoder path).
+

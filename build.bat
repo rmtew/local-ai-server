@@ -77,7 +77,7 @@ if not exist "%BIN_DIR%" mkdir "%BIN_DIR%"
 REM Detect CUDA toolkit (optional -- enables cuBLAS GPU acceleration)
 set CUDA_CFLAGS=
 set CUDA_LIBS=
-set "CUDA_DIR=C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.8"
+set "CUDA_DIR=C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v13.1"
 if exist "%CUDA_DIR%\lib\x64\cublas.lib" (
     echo CUDA found -- enabling cuBLAS GPU acceleration
     set CUDA_CFLAGS=/DUSE_CUBLAS /I"%CUDA_DIR%\include"
