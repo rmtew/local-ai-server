@@ -176,13 +176,20 @@ void handle_tts_speech(SOCKET client, const HttpRequest *request,
                stream);
     }
 
-    /* Seed RNG and force single-threaded for deterministic output.
-     * Multi-threaded GEMM has non-deterministic FP accumulation order. */
+    /* Seed RNG for each request.  Without this, rand() state carries over
+     * from previous synthesis calls, and certain states cause the model to
+     * never emit EOS (running to max_steps = 16s of audio).
+     * When an explicit seed is requested, also force single-threaded GEMM
+     * for deterministic output. */
     int saved_threads = 0;
     if (seed >= 0.0) {
         srand((unsigned int)seed);
         saved_threads = ctx->threads;
         qwen_set_threads(1);
+    } else {
+        /* Time-based seed: mix high-resolution timer bits for good entropy */
+        unsigned int t = (unsigned int)(platform_time_ms() * 1000.0);
+        srand(t);
     }
 
     /* Set up streaming if requested */
