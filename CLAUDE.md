@@ -95,9 +95,10 @@ python tools/tts_regression.py                       # Run regression checks
 python tools/tts_regression.py --sanity-only         # Non-silence + duration checks only
 python tools/tts_regression.py --refresh-refs        # Regenerate all references
 python tools/tts_regression.py --case short_hello    # Run specific case
+python tools/tts_regression.py --stream              # Test SSE streaming vs references
 ```
 
-Reference WAVs stored in `tts_samples/` (tracked in git).
+Reference WAVs stored in `tts_samples/` (tracked in git). Standalone streaming protocol test: `python tools/test_tts_streaming.py`.
 
 The `qwen-asr` submodule has its own regression suite (`asr_regression.py`).
 

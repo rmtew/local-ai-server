@@ -1,6 +1,6 @@
 # tools/
 
-Scripts and native tools for model downloading, vocoder debugging, and voice preset generation.
+Scripts and native tools for model downloading, vocoder debugging, voice preset generation, and regression testing.
 
 ## Download Scripts
 
@@ -43,6 +43,16 @@ All scripts expect to be run from the repository root and reference model files 
 | Script | Purpose |
 |--------|---------|
 | `generate_voice_presets.py` | Generate voice_presets.bin from reference WAV files (Python, requires numpy) |
+
+## Regression & Integration Tests
+
+Run from the repository root. Require a running `local-ai-server` with `--tts-model` loaded.
+
+| Script | Purpose |
+|--------|---------|
+| `tts_regression.py` | TTS regression harness: compare output WAVs against references (correlation, SNR). Supports `--stream` for SSE streaming regression |
+| `test_tts_streaming.py` | Standalone SSE streaming protocol test: validates event structure, ordering, base64 audio decode, and byte-identity with non-streaming output |
+| `tts_long_audio_test.py` | Long audio quality analysis: degeneration, entropy, repetition checks at high step counts |
 
 ## Native Tools
 

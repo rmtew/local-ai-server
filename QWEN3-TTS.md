@@ -183,7 +183,7 @@ Notes:
 
 ### Long Audio Test (max_steps=200)
 
-With `--tts-max-steps=200` (new default), the model can produce up to 16s of audio. Tested with `seed=42`, `--fp16`, texts from 28 to 721 characters. Quality analyzed via `tts_long_audio_test.py`.
+With `--tts-max-steps=200` (new default), the model can produce up to 16s of audio. Tested with `seed=42`, `--fp16`, texts from 28 to 721 characters. Quality analyzed via `tools/tts_long_audio_test.py`.
 
 **0.6B FP16:**
 
@@ -277,13 +277,14 @@ The noise is a **model characteristic**, not an implementation bug:
 
 | File | Lines | Purpose |
 |------|-------|---------|
-| `tts_pipeline.c` | ~290 | Pipeline orchestration, WAV encoding |
-| `tts_native.c` | ~1520 | Native talker LM + code predictor (C + cuBLAS) |
-| `tts_vocoder.c` | ~870 | Vocoder pipeline, weight loading, RVQ decode, buffer management |
-| `tts_vocoder_ops.c` | ~230 | Conv1d, ConvTranspose1d, SnakeBeta, LayerNorm, GELU |
-| `tts_vocoder_xfmr.c` | ~240 | 8-layer pre-transformer |
-| `tts_vocoder.h` | ~200 | Vocoder types, constants, weight structs |
-| `tts_sampling.c` | ~115 | Top-k sampling, repetition penalty |
+| `handler_tts.c` | ~240 | HTTP handler, SSE streaming, base64 encoder |
+| `tts_pipeline.c` | ~300 | Pipeline orchestration, WAV encoding, progress callbacks |
+| `tts_native.c` | ~1550 | Native talker LM + code predictor (C + cuBLAS) |
+| `tts_vocoder.c` | ~880 | Vocoder pipeline, weight loading, RVQ decode, buffer management |
+| `tts_vocoder_ops.c` | ~350 | Conv1d, ConvTranspose1d, SnakeBeta, LayerNorm, GELU |
+| `tts_vocoder_xfmr.c` | ~230 | 8-layer pre-transformer |
+| `tts_vocoder.h` | ~270 | Vocoder types, constants, weight structs |
+| `tts_sampling.c` | ~100 | Top-k sampling, repetition penalty |
 
 ## Voice Cloning
 
