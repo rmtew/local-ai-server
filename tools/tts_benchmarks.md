@@ -8,7 +8,7 @@ Performance tracking for TTS inference on local-ai-server.
 - CPU: 4 threads used for vocoder
 - OS: Windows 11
 - Build: MSVC /O2 /arch:AVX2 /fp:fast, cuBLAS + custom CUDA kernels
-- CUDA: 12.8 (cuBLAS 12)
+- CUDA: noted per entry
 
 ## Test Cases
 
@@ -62,3 +62,80 @@ VRAM: 2136 MB (216 weights, all F32)
 |--------|------:|------:|-------:|-------:|----:|------:|
 | test_speech.wav | 3.8s | 363ms | 97ms | 269ms | 0.10x | 15 |
 | jfk.wav | 11.0s | 842ms | 279ms | 565ms | 0.08x | 26 |
+
+---
+
+## 2026-02-16 — CUDA 13.1 Upgrade (from 12.8)
+
+**Change:** Upgraded CUDA toolkit from 12.8 to 13.1 Update 1. No code changes — just rebuilt with new nvcc and cuBLAS 13.
+
+**Config:** Qwen3-TTS-0.6B, 4 threads, RTX 3070 Laptop GPU, seed=42
+
+### FP16 weights (default)
+
+| Case | Steps | Audio | Total (median) | RTF | ms/step |
+|------|------:|------:|---------------:|----:|--------:|
+| 4s   |    60 |  4.8s |        8055 ms | 1.69x | 134.2 |
+| 6s   |    67 |  5.3s |        8671 ms | 1.63x | 129.4 |
+| 8s   |   116 |  9.3s |       15828 ms | 1.71x | 136.5 |
+| 10s  |   180 | 14.4s |       21982 ms | 1.53x | 122.1 |
+| 12s  |   200 | 16.0s |       23220 ms | 1.45x | 116.1 |
+| 16s  |   200 | 16.0s |       23771 ms | 1.49x | 118.9 |
+
+### F32 weights (--no-fp16)
+
+| Case | Steps | Audio | Total (median) | RTF | ms/step |
+|------|------:|------:|---------------:|----:|--------:|
+| 4s   |    46 |  3.7s |        5397 ms | 1.48x | 117.3 |
+| 6s   |    83 |  6.6s |        9855 ms | 1.49x | 118.7 |
+| 8s   |   117 |  9.3s |       14538 ms | 1.56x | 124.3 |
+| 10s  |   168 | 13.4s |       21243 ms | 1.58x | 126.4 |
+| 12s  |   200 | 16.0s |       25781 ms | 1.61x | 128.9 |
+| 16s  |   200 | 16.0s |       25608 ms | 1.60x | 128.0 |
+
+### ASR (same session)
+
+3 iterations, median, default config (ASR F32, TTS FP16):
+
+| Sample | Audio | Total | Encode | Decode | RTF | Words |
+|--------|------:|------:|-------:|-------:|----:|------:|
+| test_speech.wav | 3.8s | 352ms | 92ms | 260ms | 0.09x | 15 |
+| jfk.wav | 11.0s | 816ms | 261ms | 555ms | 0.07x | 26 |
+
+### Comparison vs CUDA 12.8
+
+**TTS FP16 ms/step:**
+
+| Case | 12.8 | 13.1 | Delta |
+|------|-----:|-----:|------:|
+| 4s   | 135.2 | 134.2 | -1% |
+| 6s   | 135.5 | 129.4 | -5% |
+| 8s   | 139.4 | 136.5 | -2% |
+| 10s  | 134.5 | 122.1 | **-9%** |
+| 12s  | 137.9 | 116.1 | **-16%** |
+| 16s  | 133.6 | 118.9 | **-11%** |
+
+**TTS F32 ms/step:**
+
+| Case | 12.8 | 13.1 | Delta |
+|------|-----:|-----:|------:|
+| 4s   | 117.0 | 117.3 | 0% |
+| 6s   | 135.4 | 118.7 | **-12%** |
+| 8s   | 141.1 | 124.3 | **-12%** |
+| 10s  | 135.3 | 126.4 | -7% |
+| 12s  | 131.0 | 128.9 | -2% |
+| 16s  | 134.2 | 128.0 | -5% |
+
+**ASR:**
+
+| Sample | 12.8 | 13.1 | Delta |
+|--------|-----:|-----:|------:|
+| test_speech.wav | 363ms | 352ms | -3% |
+| jfk.wav | 842ms | 816ms | -3% |
+
+### Observations
+
+- **TTS FP16 sees the biggest gains at longer sequences** — up to 16% faster ms/step at 200 steps. The improvement grows with sequence length, suggesting cuBLAS 13 has better kernels for the larger KV cache attention GEMMs.
+- **TTS F32 improves 5-12%** in the mid-range cases but is flat at short and long extremes.
+- **ASR improves ~3%** uniformly across both encode and decode, consistent with minor GEMM kernel improvements.
+- **No code changes required** — purely a toolkit swap with free performance. The gains are modest on Ampere (compute 8.6); newer architectures (Hopper/Blackwell) would likely see larger improvements from cuBLAS 13.
