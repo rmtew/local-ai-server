@@ -87,3 +87,37 @@ Performance tracking for ASR inference on local-ai-server.
 Negligible improvement. Encoder windowed attention (14 heads, window=104, head_dim=64) is only ~1-2ms of ~500ms encoder time. The actual encoder bottleneck is **108 cuBLAS GEMM round-trips** per forward pass (6 GEMMs/layer x 18 layers), each requiring CPU->GPU activation transfer, GPU GEMM, and GPU->CPU result transfer.
 
 The threading is correct and harmless — helps on CPU-only builds and will matter more for larger models with more heads. But for GPU-accelerated 0.6B, the next impactful optimization is **CUDA kernels for the encoder** to eliminate the GEMM round-trip overhead.
+
+---
+
+## 2026-02-16 — GPU Encoder (CUDA kernels + cuBLAS Conv2D)
+
+**Changes:**
+1. Custom CUDA kernels for encoder LayerNorm, GELU, bias_add
+2. Device-to-device cuBLAS GEMMs for transformer layers (attention still on CPU)
+3. cuBLAS for Conv2D stem GEMMs (im2col on CPU, GEMM on GPU)
+
+### Results (median of 5 runs, 2 warmup)
+
+| Sample | Audio | Total (ms) | Encode (ms) | Decode (ms) | Wall (ms) | RTF | Words |
+|--------|------:|-----------:|------------:|------------:|----------:|----:|------:|
+| test_speech.wav | 3.8s | 339 | 78 | 258 | 656 | 0.09x | 15 |
+| jfk.wav | 11.0s | 783 | 231 | 552 | 1103 | 0.07x | 26 |
+
+### Comparison vs Baseline
+
+| Sample | Encode Before | Encode After | Delta | Total Before | Total After | Delta |
+|--------|------------:|------------:|------:|------------:|------------:|------:|
+| test_speech.wav | 153ms | 78ms | **-49%** | 420ms | 339ms | **-19%** |
+| jfk.wav | 522ms | 231ms | **-56%** | 1111ms | 783ms | **-30%** |
+
+### Analysis
+
+The biggest win came from moving Conv2D stem GEMMs to cuBLAS. Profiling with verbose=2 showed:
+- Transformer layers (CUDA kernels + d2d GEMMs): only 22ms/59ms
+- Conv2D stem (CPU OpenBLAS): **127ms/372ms** — the actual bottleneck
+
+Conv2 GEMM per chunk: [480, 4320] @ [4320, 800] = ~1.7 GFLOPS. With 11 chunks for jfk, that's ~18 GFLOPS total — near OpenBLAS peak (~100 GFLOPS) but trivial for cuBLAS (~5 TFLOPS).
+
+RTF improved from 0.10x to 0.07x (14x real-time). Encoder is no longer the dominant bottleneck for short/medium audio.
+
