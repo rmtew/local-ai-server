@@ -229,5 +229,17 @@ Bandwidth: **2 bytes/element** (FP16 weight read only — half of F32's 4 bytes/
 
 The vectorized kernel narrows the gap with F32 cuBLAS to **~30% overhead** (down from ~50% scalar, ~100% dequant). The remaining gap is cuBLAS's highly tuned memory access patterns and instruction scheduling for bandwidth-limited matvecs.
 
-**Trade-off summary:** 40% VRAM savings (3655→2207 MB) for ~30% slower decode. RTF 0.10-0.14x (7-10× real-time). The dequant+cublasSgemm path remains as fallback for M>1 (not used in the decoder path).
+### Warp shuffle reduction
+
+Replaced the final 5 `__syncthreads()` barriers in the block reduction with `__shfl_down_sync()` warp intrinsics. Back-to-back benchmark (same thermal window):
+
+| Mode | test_speech.wav | | jfk.wav | |
+|------|-----:|-----:|-----:|-----:|
+| | Decode | Total | Decode | Total |
+| F32 (full GPU decoder) | 300ms | 386ms | 614ms | 904ms |
+| FP16 (vectorized + warp shuffle) | 297ms | 394ms | 630ms | 910ms |
+
+FP16 overhead vs F32: **-1% / +3%** (within noise). The combination of vectorized loads, shared memory caching, and warp shuffle brings FP16 decode to effective parity with F32 cuBLAS.
+
+**Trade-off summary:** 40% VRAM savings (3655→2207 MB) for negligible decode overhead. RTF 0.08-0.10x (10-12× real-time). The dequant+cublasSgemm path remains as fallback for M>1 (not used in the decoder path).
 

@@ -65,7 +65,7 @@ static void print_usage(const char *prog) {
     printf("  --language=<lang>  Force ASR language (default: auto-detect)\n");
     printf("  --threads=<N>      CPU threads for inference (default: 4)\n");
     printf("  --no-fp16          Disable TTS FP16 (TTS uses FP16 by default on GPU)\n");
-    printf("  --fp16-asr         Store ASR decoder weights as FP16 (saves ~1.5 GB VRAM, ~30%% slower decode)\n");
+    printf("  --fp16-asr         Store ASR decoder weights as FP16 (saves ~1.5 GB VRAM)\n");
     printf("  --tts-max-steps=<N> Max TTS decode steps (default 200, ~16s audio)\n");
     printf("  --verbose          Enable verbose logging\n");
     printf("  --help             Show this help message\n");
