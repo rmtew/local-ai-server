@@ -64,6 +64,7 @@ bin/local-ai-server.exe \
 
 - `--tts-model`: Supports both 0.6B and 1.7B models. Model size auto-detected. Both need the shared vocoder at `<tts-model>/../Qwen3-TTS-Tokenizer-12Hz/`.
 - `--fp16`: Store TTS talker weights as FP16 on GPU. VRAM savings: 0.6B 2136→1278 MB, 1.7B 5852→3136 MB. Code predictor stays F32 for audio quality. Uses `cublasGemmEx` with FP16 inputs, F32 accumulation. ASR weights are unaffected.
+- `--tts-max-steps=N`: Max decode steps (default 200, ~16s audio). Each step = 80ms audio.
 
 TTS auto-locates vocoder weights as sibling directory: `<tts-model>/../Qwen3-TTS-Tokenizer-12Hz/model.safetensors`
 

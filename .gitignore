@@ -12,3 +12,4 @@ bin/
 *.pcm
 __pycache__/
 *.pyc
+.claude/

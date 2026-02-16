@@ -36,7 +36,7 @@
 #define TTS_CODEC_VOCAB         2048
 #define TTS_TEXT_VOCAB          151936
 #define TTS_NUM_CODE_GROUPS     16
-#define TTS_MAX_DECODE_STEPS    50
+#define TTS_MAX_DECODE_STEPS    200     /* default, overridable via ctx->max_steps */
 #define TTS_WAV_SAMPLE_RATE     24000
 #define TTS_ROPE_THETA          1000000.0f
 #define TTS_RMS_NORM_EPS        1e-6f
@@ -166,6 +166,7 @@ typedef struct {
     void *gpu_ctx;              /* qwen_gpu_ctx_t* -- shared with ASR if both loaded */
 #endif
 
+    int max_steps;              /* max decode steps (default TTS_MAX_DECODE_STEPS) */
     int verbose;
 } tts_native_ctx_t;
 

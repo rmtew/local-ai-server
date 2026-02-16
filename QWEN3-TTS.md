@@ -150,8 +150,40 @@ Wall-clock time including talker decode (GPU), code predictor (GPU), vocoder (CP
 Notes:
 - 0.6B F32 is fastest overall — the FP16 CPU-side activation conversion overhead can outweigh VRAM savings
 - 1.7B is ~30-40% slower than 0.6B for medium/long text
-- Long text hits the 50-step decode limit (~4s audio) in all configurations
+- Measured at `--tts-max-steps=50` (old default). With the new default of 200, longer text produces more steps and longer audio.
 - Vocoder time is identical across models (same vocoder, same codec format)
+
+### Long Audio Test (max_steps=200)
+
+With `--tts-max-steps=200` (new default), the model can produce up to 16s of audio. Tested with `seed=42`, `--fp16`, texts from 28 to 721 characters. Quality analyzed via `tts_long_audio_test.py`.
+
+**0.6B FP16:**
+
+| Text | Chars | Steps | EOS? | Duration | CB0 Repeat | Entropy Drop | Synth Time |
+|------|-------|-------|------|----------|------------|-------------|------------|
+| Short | 28 | 27 | yes | 2.1s | 11.5% | +0.02b | 7.5s |
+| Medium | 102 | 80 | yes | 6.4s | 6.3% | +0.15b | 15.6s |
+| Long | 262 | 191 | yes | 15.3s | 6.3% | -0.02b | 31.0s |
+| Very long | 559 | 200 | no | 16.0s | 9.5% | +0.11b | 29.1s |
+| Extra long | 721 | 200 | no | 16.0s | 6.0% | +0.09b | 28.6s |
+
+**1.7B FP16:**
+
+| Text | Chars | Steps | EOS? | Duration | CB0 Repeat | Entropy Drop | Synth Time |
+|------|-------|-------|------|----------|------------|-------------|------------|
+| Short | 28 | 25 | yes | 2.0s | 4.2% | +0.04b | 6.7s |
+| Medium | 102 | 77 | yes | 6.1s | 6.6% | +0.22b | 17.7s |
+| Long | 262 | 200 | no | 16.0s | 7.0% | -0.03b | 34.9s |
+| Very long | 559 | 200 | no | 16.0s | 9.5% | +0.16b | 35.6s |
+| Extra long | 721 | 200 | no | 16.0s | 5.0% | -0.03b | 34.5s |
+
+Key observations:
+- Both models produce natural EOS for short/medium text (no forced truncation)
+- 0.6B produces 191 steps (15.3s) for 262-char text before EOS — nearly fills the 200-step buffer
+- No entropy collapse or repetition spikes at 200 steps — no degeneration detected
+- CB0 repeat rate stays below 10% for all cases (healthy range)
+- Entropy drop between first/second half is <0.25 bits (negligible)
+- Long text (500+ chars) hits the 200-step limit at ~16s audio. For the full text, the decode continues speaking until truncated.
 
 ## Quality Comparison (0.6B vs 1.7B)
 
@@ -203,7 +235,7 @@ The noise is a **model characteristic**, not an implementation bug:
 - **In-context voice cloning** (`x_vector_only_mode=False`): Prepend reference audio codec tokens and transcript to the input sequence for higher quality cloning. Currently only x-vector mode is implemented.
 - **1.7B quality investigation**: The 1.7B Base model produces occasional reverb/noise on some seeds. Could investigate: lower temperature sampling, different top-k values, or the Instruct model variant which may have better quality tuning.
 - **Instruct model variants**: Qwen also provides `0.6B-Instruct` and `1.7B-Instruct` models which may have different quality characteristics. These use a chat-template prompt format and could be worth testing.
-- **Longer audio**: Current 50-step decode limit produces ~4s audio. Increasing this would require longer KV cache and may affect quality for very long sequences.
+- **Even longer audio**: Default raised from 50 to 200 steps (~16s). No degeneration detected at 200 steps. Could push further (KV cache and buffers auto-grow), but quality at 300+ steps is untested.
 - **Vocoder GPU acceleration**: The vocoder currently runs on CPU (OpenBLAS). Moving convolutions to GPU (cuBLAS or custom CUDA kernels) could significantly reduce total inference time, especially for longer audio.
 - **Streaming output**: Generate and send audio chunks as decode steps complete, rather than waiting for the full sequence.
 

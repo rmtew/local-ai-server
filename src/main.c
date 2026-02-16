@@ -61,6 +61,7 @@ static void print_usage(const char *prog) {
     printf("  --language=<lang>  Force ASR language (default: auto-detect)\n");
     printf("  --threads=<N>      CPU threads for inference (default: 4)\n");
     printf("  --fp16             Store TTS GPU weights as FP16 (halves VRAM)\n");
+    printf("  --tts-max-steps=<N> Max TTS decode steps (default 200, ~16s audio)\n");
     printf("  --verbose          Enable verbose logging\n");
     printf("  --help             Show this help message\n");
     printf("\nASR languages: %s\n", qwen_supported_languages_csv());
@@ -94,6 +95,7 @@ int main(int argc, char **argv) {
     int threads = 4;
     int verbose = 0;
     int fp16 = 0;
+    int tts_max_steps = 0;  /* 0 = use default (TTS_MAX_DECODE_STEPS) */
 
     /* Parse arguments */
     for (int i = 1; i < argc; i++) {
@@ -112,6 +114,8 @@ int main(int argc, char **argv) {
             verbose = 1;
         } else if (strcmp(argv[i], "--fp16") == 0) {
             fp16 = 1;
+        } else if ((val = parse_arg(argv[i], "--tts-max-steps")) != NULL) {
+            tts_max_steps = atoi(val);
         } else if (strcmp(argv[i], "--help") == 0 || strcmp(argv[i], "-h") == 0) {
             print_usage(argv[0]);
             return 0;
@@ -170,6 +174,12 @@ int main(int argc, char **argv) {
             free(tts_pipeline);
             if (asr_ctx) qwen_free(asr_ctx);
             return 1;
+        }
+        if (tts_max_steps > 0) {
+            tts_pipeline->native->max_steps = tts_max_steps;
+            if (verbose)
+                printf("TTS max decode steps: %d (~%.1fs audio)\n",
+                       tts_max_steps, tts_max_steps * 0.08);
         }
     }
 

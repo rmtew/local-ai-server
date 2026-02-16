@@ -1007,10 +1007,11 @@ static int64_t *run_decode_loop(tts_native_ctx_t *ctx,
                                 int *out_n_steps) {
     int H_T = ctx->talker_config.dec_hidden;   /* talker hidden: 1024 or 2048 */
     int H_CP = ctx->cp_config.dec_hidden;      /* code predictor hidden: always 1024 */
+    int max_steps = ctx->max_steps > 0 ? ctx->max_steps : TTS_MAX_DECODE_STEPS;
     *out_n_steps = 0;
 
-    int64_t *all_codes = (int64_t *)malloc((size_t)TTS_MAX_DECODE_STEPS * TTS_NUM_CODE_GROUPS * sizeof(int64_t));
-    int *cb0_history = (int *)malloc(TTS_MAX_DECODE_STEPS * sizeof(int));
+    int64_t *all_codes = (int64_t *)malloc((size_t)max_steps * TTS_NUM_CODE_GROUPS * sizeof(int64_t));
+    int *cb0_history = (int *)malloc(max_steps * sizeof(int));
     if (!all_codes || !cb0_history) { free(all_codes); free(cb0_history); return NULL; }
     int history_len = 0;
 
@@ -1063,7 +1064,7 @@ static int64_t *run_decode_loop(tts_native_ctx_t *ctx,
 
     extern volatile int g_shutdown;
 
-    for (int step = 0; step < TTS_MAX_DECODE_STEPS; step++) {
+    for (int step = 0; step < max_steps; step++) {
         if (g_shutdown) {
             if (ctx->verbose) printf("  TTS native: interrupted by shutdown\n");
             break;
@@ -1151,7 +1152,7 @@ static int64_t *run_decode_loop(tts_native_ctx_t *ctx,
 
         n_steps++;
 
-        if (step + 1 >= TTS_MAX_DECODE_STEPS) break;
+        if (step + 1 >= max_steps) break;
 
         /* ---- Talker decode step ---- */
         talker_forward(ctx, ctx->codec_sum_buf, last_hidden_normed);
@@ -1256,6 +1257,7 @@ int tts_native_init(tts_native_ctx_t *ctx, const char *model_dir,
                     void *gpu_ctx, int fp16, int verbose) {
     memset(ctx, 0, sizeof(*ctx));
     ctx->verbose = verbose;
+    ctx->max_steps = TTS_MAX_DECODE_STEPS;
 
 #ifdef USE_CUBLAS
     ctx->gpu_ctx = gpu_ctx;
