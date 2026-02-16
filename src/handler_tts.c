@@ -15,6 +15,8 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "platform.h"
+
 /* ---- Base64 encoder ---- */
 
 static const char b64_table[] =
@@ -195,6 +197,7 @@ void handle_tts_speech(SOCKET client, const HttpRequest *request,
     }
 
     /* Run synthesis */
+    double t_synth_start = platform_time_ms();
     TtsResult result;
     const char *v = voice[0] ? voice : NULL;
     const char *lang = language[0] ? language : NULL;
@@ -203,6 +206,7 @@ void handle_tts_speech(SOCKET client, const HttpRequest *request,
                                       (float)speed,
                                       progress_fn, progress_data,
                                       &result);
+    double t_synth_end = platform_time_ms();
 
     if (saved_threads > 0) {
         qwen_set_threads(saved_threads);
@@ -221,12 +225,6 @@ void handle_tts_speech(SOCKET client, const HttpRequest *request,
         return;
     }
 
-    if (ctx->verbose) {
-        printf("  TTS result: %d steps, %d samples, %.0f ms, %.1f KB\n",
-               result.n_steps, result.n_samples, result.elapsed_ms,
-               (double)result.wav_len / 1024.0);
-    }
-
     if (stream) {
         /* Send audio as base64 in final SSE event, then [DONE] */
         send_audio_sse(client, &result);
@@ -236,5 +234,15 @@ void handle_tts_speech(SOCKET client, const HttpRequest *request,
         http_send_response(client, 200, "audio/wav",
                            (const char *)result.wav_data, result.wav_len);
     }
+    double t_send_end = platform_time_ms();
+
+    printf("  TTS: %d steps, %d samples (%.1fs), synth=%.0fms send=%.0fms total=%.0fms (%.1f KB)\n",
+           result.n_steps, result.n_samples,
+           (double)result.n_samples / 24000.0,
+           t_synth_end - t_synth_start,
+           t_send_end - t_synth_end,
+           t_send_end - t_synth_start,
+           (double)result.wav_len / 1024.0);
+
     free(result.wav_data);
 }

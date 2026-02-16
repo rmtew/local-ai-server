@@ -26,6 +26,7 @@
 #include "qwen_asr.h"
 #include "qwen_asr_kernels.h"
 #include "tts_pipeline.h"
+#include "config.h"
 
 /* Global server for Ctrl+C handler */
 static HttpServer g_server;
@@ -88,16 +89,20 @@ int main(int argc, char **argv) {
     setvbuf(stdout, NULL, _IONBF, 0);
     setvbuf(stderr, NULL, _IONBF, 0);
 
-    const char *model_dir = NULL;
-    const char *tts_model_dir = NULL;
-    int port = 8090;
-    const char *language = NULL;
-    int threads = 4;
-    int verbose = 0;
-    int fp16 = 0;
-    int tts_max_steps = 0;  /* 0 = use default (TTS_MAX_DECODE_STEPS) */
+    /* Load config.json defaults (optional) */
+    app_config_t cfg;
+    config_load(&cfg, argv[0]);
 
-    /* Parse arguments */
+    const char *model_dir = cfg.model[0] ? cfg.model : NULL;
+    const char *tts_model_dir = cfg.tts_model[0] ? cfg.tts_model : NULL;
+    int port = cfg.port > 0 ? cfg.port : 8090;
+    const char *language = cfg.language[0] ? cfg.language : NULL;
+    int threads = cfg.threads > 0 ? cfg.threads : 4;
+    int verbose = cfg.verbose == 1 ? 1 : 0;
+    int fp16 = cfg.fp16 == 1 ? 1 : 0;
+    int tts_max_steps = cfg.tts_max_steps;  /* 0 = use default (TTS_MAX_DECODE_STEPS) */
+
+    /* Parse arguments (override config) */
     for (int i = 1; i < argc; i++) {
         const char *val;
         if ((val = parse_arg(argv[i], "--model")) != NULL) {
@@ -127,7 +132,8 @@ int main(int argc, char **argv) {
     }
 
     if (!model_dir && !tts_model_dir) {
-        fprintf(stderr, "Error: at least one of --model or --tts-model is required\n\n");
+        fprintf(stderr, "Error: at least one of --model or --tts-model is required\n");
+        fprintf(stderr, "Specify via CLI args or config.json\n\n");
         print_usage(argv[0]);
         return 1;
     }
@@ -202,6 +208,8 @@ int main(int argc, char **argv) {
     /* Print banner */
     printf("\n");
     printf("=== local-ai-server ===\n");
+    if (cfg.loaded)
+        printf("Config:   %s\n", cfg.config_path);
     printf("Port:     %d\n", port);
     if (model_dir)
         printf("ASR:      %s\n", model_dir);

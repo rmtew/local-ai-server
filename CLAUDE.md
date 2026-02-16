@@ -19,6 +19,7 @@ Requires MSVC (Visual Studio C++ workload). Set `DEPS_ROOT` environment variable
 git submodule update --init
 C:/Data/R/git/claude-repos/local-ai-server/build.bat           # auto-detects OpenBLAS, CUDA
 C:/Data/R/git/claude-repos/local-ai-server/build.bat bench     # vocoder benchmark
+C:/Data/R/git/claude-repos/local-ai-server/build.bat ttsbench  # TTS pipeline benchmark
 C:/Data/R/git/claude-repos/local-ai-server/build.bat presets   # voice preset tool
 ```
 
@@ -53,9 +54,23 @@ The Makefile also supports macOS (uses `-framework Accelerate` instead of OpenBL
 - Server code: `-g -DDEBUG` (gcc) / `/Od /Zi` (MSVC)
 - Conditional defines: `USE_BLAS`, `USE_CUBLAS`, `USE_CUDA_KERNELS`
 
+## Configuration
+
+All settings can be specified in `config.json` (project root, gitignored) and overridden by CLI args. Copy the template to get started:
+
+```bash
+cp config.example.json config.json   # then edit paths
+```
+
+The server, `tts-bench`, and other tools all read from `config.json` automatically. Model paths, port, threads, fp16, and verbose are all configurable. CLI arguments always take priority.
+
 ## Running
 
 ```bash
+# With config.json (no args needed if model paths are configured):
+bin/local-ai-server.exe
+
+# Or with explicit CLI args (override config.json):
 bin/local-ai-server.exe \
   --model=path/to/qwen3-asr-0.6b \
   --tts-model=path/to/qwen3-tts-12hz-0.6b-base \

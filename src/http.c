@@ -22,6 +22,10 @@
 #include <stdlib.h>
 #include <string.h>
 
+#ifdef _WIN32
+#include <mstcpip.h>   /* SIO_TCP_SET_ACK_FREQUENCY */
+#endif
+
 #define HEADER_BUF_SIZE  (16 * 1024)
 #define MAX_BODY_SIZE    (100 * 1024 * 1024)  /* 100 MB */
 
@@ -150,6 +154,28 @@ void http_server_run(HttpServer *srv, http_handler_fn handler, void *user_data) 
             continue;
         }
 
+        /* Disable Nagle's algorithm — send small packets immediately.
+         * Critical for HTTP responses: avoids 200ms coalescing delays
+         * when header and body are sent as separate send() calls. */
+        {
+            int flag = 1;
+            setsockopt(client, IPPROTO_TCP, TCP_NODELAY,
+                       (const char *)&flag, sizeof(flag));
+        }
+
+#ifdef _WIN32
+        /* Reduce delayed-ACK from default 200ms to 1ms.
+         * Windows TCP stacks wait before ACK-ing, adding round-trip latency
+         * on localhost where RTT is effectively 0. */
+        {
+            DWORD freq = 1;
+            DWORD bytes_returned = 0;
+            WSAIoctl(client, SIO_TCP_SET_ACK_FREQUENCY,
+                     &freq, sizeof(freq), NULL, 0,
+                     &bytes_returned, NULL, NULL);
+        }
+#endif
+
         /* Receive headers */
         char header_buf[HEADER_BUF_SIZE];
         int header_total = 0;
@@ -276,10 +302,7 @@ void http_send_json_error(SOCKET client, int status, const char *message, const 
 }
 
 void http_send_sse_headers(SOCKET client) {
-    /* Set TCP_NODELAY to flush small writes immediately */
-    int flag = 1;
-    setsockopt(client, IPPROTO_TCP, TCP_NODELAY, (const char *)&flag, sizeof(flag));
-
+    /* TCP_NODELAY already set on accept — no need to set again */
     const char *headers =
         "HTTP/1.1 200 OK\r\n"
         "Content-Type: text/event-stream\r\n"
