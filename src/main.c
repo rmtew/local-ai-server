@@ -6,7 +6,7 @@
  *
  * Usage: local-ai-server.exe [--model=<dir>] [--tts-model=<dir>] [--port=N]
  *                             [--language=<lang>] [--threads=N] [--no-fp16]
- *                             [--fp16-asr] [--verbose] [--help]
+ *                             [--no-fp16-asr] [--verbose] [--help]
  */
 
 #define _CRT_SECURE_NO_WARNINGS
@@ -65,7 +65,7 @@ static void print_usage(const char *prog) {
     printf("  --language=<lang>  Force ASR language (default: auto-detect)\n");
     printf("  --threads=<N>      CPU threads for inference (default: 4)\n");
     printf("  --no-fp16          Disable TTS FP16 (TTS uses FP16 by default on GPU)\n");
-    printf("  --fp16-asr         Store ASR decoder weights as FP16 (saves ~1.5 GB VRAM)\n");
+    printf("  --no-fp16-asr      Disable ASR FP16 (ASR uses FP16 by default on GPU)\n");
     printf("  --tts-max-steps=<N> Max TTS decode steps (default 200, ~16s audio)\n");
     printf("  --verbose          Enable verbose logging\n");
     printf("  --help             Show this help message\n");
@@ -105,7 +105,7 @@ int main(int argc, char **argv) {
     int verbose = cfg.verbose == 1 ? 1 : 0;
 #ifdef USE_CUBLAS
     int tts_fp16 = cfg.tts_fp16 == 0 ? 0 : 1;  /* default ON for GPU builds */
-    int asr_fp16 = cfg.asr_fp16 == 1 ? 1 : 0;   /* default OFF */
+    int asr_fp16 = cfg.asr_fp16 == 0 ? 0 : 1;   /* default ON for GPU builds */
 #else
     int tts_fp16 = 0;
     int asr_fp16 = 0;
@@ -129,8 +129,10 @@ int main(int argc, char **argv) {
             verbose = 1;
         } else if (strcmp(argv[i], "--no-fp16") == 0) {
             tts_fp16 = 0;
+        } else if (strcmp(argv[i], "--no-fp16-asr") == 0) {
+            asr_fp16 = 0;
         } else if (strcmp(argv[i], "--fp16-asr") == 0) {
-            asr_fp16 = 1;
+            asr_fp16 = 1;  /* legacy: still accepted */
         } else if ((val = parse_arg(argv[i], "--tts-max-steps")) != NULL) {
             tts_max_steps = atoi(val);
         } else if (strcmp(argv[i], "--help") == 0 || strcmp(argv[i], "-h") == 0) {

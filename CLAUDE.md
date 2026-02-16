@@ -79,9 +79,9 @@ bin/local-ai-server.exe \
 
 - `--tts-model`: Supports both 0.6B and 1.7B models. Model size auto-detected. Both need the shared vocoder at `<tts-model>/../Qwen3-TTS-Tokenizer-12Hz/`.
 - **TTS FP16** (on by default for GPU builds): TTS talker weights stored as FP16, halving VRAM with no quality or speed penalty. VRAM savings: 0.6B 2136→1278 MB, 1.7B 5852→3136 MB. Code predictor stays F32 for audio quality. Disable with `--no-fp16`.
-- `--fp16-asr`: Opt-in. Store ASR decoder weights as FP16, saving ~1.5 GB VRAM (0.6B: 3655→2207 MB). Encoder weights stay F32. Full GPU decoder stays enabled via fused FP16 matvec kernel (negligible speed impact). Off by default but recommended when VRAM is constrained.
+- **ASR FP16** (on by default for GPU builds): ASR decoder weights stored as FP16, saving ~1.5 GB VRAM (0.6B: 3655→2207 MB). Encoder weights stay F32. Full GPU decoder stays enabled via fused FP16 matvec kernel (negligible speed impact). Disable with `--no-fp16-asr`.
 - `--tts-max-steps=N`: Max decode steps (default 200, ~16s audio). Each step = 80ms audio.
-- Config keys: `tts_fp16` (default true), `asr_fp16` (default false). Legacy `fp16` key still works as fallback for both.
+- Config keys: `tts_fp16` (default true), `asr_fp16` (default true). Legacy `fp16` key still works as fallback for both.
 
 TTS auto-locates vocoder weights as sibling directory: `<tts-model>/../Qwen3-TTS-Tokenizer-12Hz/model.safetensors`
 
