@@ -53,8 +53,15 @@ static int try_load(app_config_t *cfg, const char *path) {
         cfg->tts_max_steps = (int)dval;
 
     int bval;
-    if (jr_get_bool(json, len, "fp16", &bval) == 0)
-        cfg->fp16 = bval;
+    if (jr_get_bool(json, len, "tts_fp16", &bval) == 0)
+        cfg->tts_fp16 = bval;
+    if (jr_get_bool(json, len, "asr_fp16", &bval) == 0)
+        cfg->asr_fp16 = bval;
+    /* Legacy: "fp16" sets both if the new keys aren't present */
+    if (jr_get_bool(json, len, "fp16", &bval) == 0) {
+        if (cfg->tts_fp16 == -1) cfg->tts_fp16 = bval;
+        if (cfg->asr_fp16 == -1) cfg->asr_fp16 = bval;
+    }
     if (jr_get_bool(json, len, "verbose", &bval) == 0)
         cfg->verbose = bval;
 
@@ -67,7 +74,8 @@ static int try_load(app_config_t *cfg, const char *path) {
 
 int config_load(app_config_t *cfg, const char *exe_path) {
     memset(cfg, 0, sizeof(*cfg));
-    cfg->fp16 = -1;
+    cfg->tts_fp16 = -1;
+    cfg->asr_fp16 = -1;
     cfg->verbose = -1;
 
     /* Try 1: cwd/config.json */

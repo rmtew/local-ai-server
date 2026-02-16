@@ -3,6 +3,7 @@
     "tts_model": "/path/to/qwen3-tts-12hz-0.6b-base",
     "port": 8090,
     "threads": 4,
-    "fp16": true,
+    "tts_fp16": true,
+    "asr_fp16": false,
     "verbose": false
 }

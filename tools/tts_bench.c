@@ -224,7 +224,12 @@ int main(int argc, char **argv) {
     config_load(&cfg, argv[0]);
 
     const char *model_dir = cfg.tts_model[0] ? cfg.tts_model : NULL;
-    int fp16 = cfg.fp16 == 1 ? 1 : 0;
+    /* TTS defaults to FP16 on GPU builds; config tts_fp16 overrides, legacy fp16 as fallback */
+#ifdef USE_CUBLAS
+    int fp16 = cfg.tts_fp16 == 0 ? 0 : 1;
+#else
+    int fp16 = 0;
+#endif
     int runs = 3;
     int warmup = 1;
     int threads = cfg.threads > 0 ? cfg.threads : 4;
@@ -236,6 +241,8 @@ int main(int argc, char **argv) {
             model_dir = val;
         } else if (strcmp(argv[i], "--fp16") == 0) {
             fp16 = 1;
+        } else if (strcmp(argv[i], "--no-fp16") == 0) {
+            fp16 = 0;
         } else if ((val = parse_arg(argv[i], "--runs")) != NULL) {
             runs = atoi(val);
             if (runs < 1) runs = 1;

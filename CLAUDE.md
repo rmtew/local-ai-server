@@ -62,7 +62,7 @@ All settings can be specified in `config.json` (project root, gitignored) and ov
 cp config.example.json config.json   # then edit paths
 ```
 
-The server, `tts-bench`, and other tools all read from `config.json` automatically. Model paths, port, threads, fp16, and verbose are all configurable. CLI arguments always take priority.
+The server, `tts-bench`, and other tools all read from `config.json` automatically. Model paths, port, threads, FP16, and verbose are all configurable. CLI arguments always take priority.
 
 ## Running
 
@@ -74,12 +74,14 @@ bin/local-ai-server.exe
 bin/local-ai-server.exe \
   --model=path/to/qwen3-asr-0.6b \
   --tts-model=path/to/qwen3-tts-12hz-0.6b-base \
-  --port=8090 --threads=4 --fp16 --verbose
+  --port=8090 --threads=4 --verbose
 ```
 
 - `--tts-model`: Supports both 0.6B and 1.7B models. Model size auto-detected. Both need the shared vocoder at `<tts-model>/../Qwen3-TTS-Tokenizer-12Hz/`.
-- `--fp16`: Store TTS talker weights as FP16 on GPU. VRAM savings: 0.6B 2136→1278 MB, 1.7B 5852→3136 MB. Code predictor stays F32 for audio quality. Uses `cublasGemmEx` with FP16 inputs, F32 accumulation. ASR weights are unaffected.
+- **TTS FP16** (on by default for GPU builds): TTS talker weights stored as FP16, halving VRAM with no quality or speed penalty. VRAM savings: 0.6B 2136→1278 MB, 1.7B 5852→3136 MB. Code predictor stays F32 for audio quality. Disable with `--no-fp16`.
+- `--fp16-asr`: Opt-in. Store ASR decoder weights as FP16, saving ~1.5 GB VRAM (0.6B: 3655→2182 MB). Encoder weights stay F32. Decode falls back to CPU decoder with GPU GEMM offload (~2x slower decode, encode unaffected). Off by default because the VRAM/speed tradeoff is situational.
 - `--tts-max-steps=N`: Max decode steps (default 200, ~16s audio). Each step = 80ms audio.
+- Config keys: `tts_fp16` (default true), `asr_fp16` (default false). Legacy `fp16` key still works as fallback for both.
 
 TTS auto-locates vocoder weights as sibling directory: `<tts-model>/../Qwen3-TTS-Tokenizer-12Hz/model.safetensors`
 

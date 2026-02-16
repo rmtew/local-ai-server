@@ -121,3 +121,41 @@ Conv2 GEMM per chunk: [480, 4320] @ [4320, 800] = ~1.7 GFLOPS. With 11 chunks fo
 
 RTF improved from 0.10x to 0.07x (14x real-time). Encoder is no longer the dominant bottleneck for short/medium audio.
 
+---
+
+## 2026-02-16 — FP16 Decoder Weights (VRAM savings)
+
+**Change:** When `--fp16` is set, ASR decoder weights (BF16 on disk) are uploaded to GPU as FP16 instead of F32, halving decoder VRAM. Encoder weights (F32 on disk) remain F32.
+
+**Config:** Qwen3-ASR-0.6B, 4 threads, RTX 3070 Laptop GPU, `--fp16`
+
+### VRAM Impact
+
+| Mode | ASR VRAM | Weights | Breakdown |
+|------|----------|---------|-----------|
+| F32 (default) | 3655 MB | 339 weights, all F32 | — |
+| FP16 | 2182 MB | 339 weights: 3 F32, 336 FP16 | **-1473 MB (-40%)** |
+
+The 3 F32 weights are encoder weights (loaded from F32 safetensors). All 336 decoder weights (loaded from BF16 safetensors) are stored as FP16.
+
+### Performance (2 iterations)
+
+| Mode | test_speech.wav Decode | jfk.wav Decode | Transcription |
+|------|----------------------:|---------------:|---------------|
+| F32 (full GPU decoder) | 267ms (0.09x RTF) | 575ms (0.07x RTF) | Correct |
+| FP16 (CPU decoder + GPU GEMM) | 549ms (0.17x RTF) | 1116ms (0.13x RTF) | Correct |
+
+### Analysis
+
+**The full GPU decoder does not work with FP16 weights.** Three approaches were tested:
+
+1. **Mixed FP16×F32 inputs** to `cublasGemmEx`: Returns `CUBLAS_STATUS_SUCCESS` but produces all zeros. cuBLAS does not support mixed input types — both A and B must have the same datatype.
+
+2. **FP16×FP16 with activation conversion** (D2H → F32→F16 → H2D → `cublasGemmEx`): Produces non-zero output but garbage tokens (99889, 119983, etc.). The numeric variance from CUDA kernel non-GEMM ops (RMSNorm, RoPE, SwiGLU) compounds with FP16 quantization loss through 24 autoregressive decoder layers, causing token divergence.
+
+3. **Delegation to `qwen_gpu_gemm`** (known-working CPU↔GPU GEMM path): Same garbage tokens. Confirms the issue is not in the GEMM itself but in the interaction between GPU-side non-GEMM ops and reduced precision.
+
+**Working solution:** When FP16 is active, skip the full GPU decoder and fall back to the CPU decoder with GPU GEMM offload (`qwen_gpu_gemm`). The CPU handles non-GEMM ops (RMSNorm, RoPE, attention, SwiGLU) in F32, while GEMMs are offloaded to GPU using FP16 weights via `cublasGemmEx` (FP16×FP16→F32 accumulation). This preserves the VRAM savings (~1.5 GB) with correct transcription, at ~2x decode slowdown.
+
+**Trade-off:** 40% VRAM reduction (3655→2182 MB) for ~2x slower decode. Total ASR time (including encoder, which is unchanged) goes from ~0.08x to ~0.15x RTF — still 6-7x faster than real-time. Worthwhile when VRAM is scarce (e.g. running both ASR + TTS 1.7B simultaneously).
+
