@@ -25,8 +25,10 @@
 #include "handler_asr.h"
 #include "qwen_asr.h"
 #include "qwen_asr_kernels.h"
+#include "qwen_asr_gpu.h"
 #include "tts_pipeline.h"
 #include "config.h"
+#include "platform.h"
 
 /* Global server for Ctrl+C handler */
 static HttpServer g_server;
@@ -145,6 +147,17 @@ int main(int argc, char **argv) {
         qwen_verbose = 1;
     }
 
+    /* Per-model memory tracking */
+#ifdef USE_CUBLAS
+    qwen_gpu_stats_t gpu_stats_asr = {0};
+    qwen_gpu_stats_t gpu_stats_tts = {0};
+    qwen_gpu_stats_t gpu_stats_total = {0};
+    extern qwen_gpu_ctx_t *g_gpu_ctx;
+#endif
+    size_t rss_baseline = platform_rss_bytes();
+    size_t rss_after_asr = 0;
+    size_t rss_after_tts = 0;
+
     /* Load ASR model (optional) */
     qwen_ctx_t *asr_ctx = NULL;
     if (model_dir) {
@@ -154,6 +167,10 @@ int main(int argc, char **argv) {
             fprintf(stderr, "Error: failed to load ASR model from %s\n", model_dir);
             return 1;
         }
+        rss_after_asr = platform_rss_bytes();
+#ifdef USE_CUBLAS
+        qwen_gpu_get_stats(g_gpu_ctx, &gpu_stats_asr);
+#endif
 
         /* Set forced language if specified */
         if (language) {
@@ -187,6 +204,15 @@ int main(int argc, char **argv) {
                 printf("TTS max decode steps: %d (~%.1fs audio)\n",
                        tts_max_steps, tts_max_steps * 0.08);
         }
+        rss_after_tts = platform_rss_bytes();
+#ifdef USE_CUBLAS
+        qwen_gpu_get_stats(g_gpu_ctx, &gpu_stats_total);
+        /* TTS delta = total - ASR */
+        gpu_stats_tts.n_weights = gpu_stats_total.n_weights - gpu_stats_asr.n_weights;
+        gpu_stats_tts.n_weights_f32 = gpu_stats_total.n_weights_f32 - gpu_stats_asr.n_weights_f32;
+        gpu_stats_tts.n_weights_f16 = gpu_stats_total.n_weights_f16 - gpu_stats_asr.n_weights_f16;
+        gpu_stats_tts.vram_weights = gpu_stats_total.vram_weights - gpu_stats_asr.vram_weights;
+#endif
     }
 
     /* Initialize HTTP server */
@@ -211,17 +237,70 @@ int main(int argc, char **argv) {
     if (cfg.loaded)
         printf("Config:   %s\n", cfg.config_path);
     printf("Port:     %d\n", port);
-    if (model_dir)
+    if (model_dir) {
         printf("ASR:      %s\n", model_dir);
+        {
+            int ram_mb = rss_after_asr > rss_baseline
+                       ? (int)((rss_after_asr - rss_baseline) / (1024 * 1024)) : 0;
+#ifdef USE_CUBLAS
+            if (gpu_stats_asr.n_weights > 0)
+                printf("          %d MB RAM, %d MB VRAM (%d weights, F32)\n",
+                       ram_mb,
+                       (int)(gpu_stats_asr.vram_weights / (1024 * 1024)),
+                       gpu_stats_asr.n_weights);
+            else
+#endif
+                printf("          %d MB RAM\n", ram_mb);
+        }
+    }
     if (tts_model_dir) {
         printf("TTS:      %s\n", tts_model_dir);
-        if (fp16) printf("          FP16 GPU weights\n");
+        {
+            size_t rss_before_tts = rss_after_asr > 0 ? rss_after_asr : rss_baseline;
+            int ram_mb = rss_after_tts > rss_before_tts
+                       ? (int)((rss_after_tts - rss_before_tts) / (1024 * 1024)) : 0;
+#ifdef USE_CUBLAS
+            if (gpu_stats_tts.n_weights > 0) {
+                if (gpu_stats_tts.n_weights_f16 > 0)
+                    printf("          %d MB RAM, %d MB VRAM (%d weights: %d F32, %d FP16)\n",
+                           ram_mb,
+                           (int)(gpu_stats_tts.vram_weights / (1024 * 1024)),
+                           gpu_stats_tts.n_weights,
+                           gpu_stats_tts.n_weights_f32, gpu_stats_tts.n_weights_f16);
+                else
+                    printf("          %d MB RAM, %d MB VRAM (%d weights, F32)\n",
+                           ram_mb,
+                           (int)(gpu_stats_tts.vram_weights / (1024 * 1024)),
+                           gpu_stats_tts.n_weights);
+            } else
+#endif
+                printf("          %d MB RAM\n", ram_mb);
+        }
     }
     if (language)
         printf("Language: %s\n", language);
     printf("Threads:  %d\n", threads);
+    {
+        size_t rss_final = rss_after_tts > 0 ? rss_after_tts
+                         : rss_after_asr > 0 ? rss_after_asr : 0;
+        if (rss_final > rss_baseline)
+            printf("RAM:      %d MB total\n",
+                   (int)((rss_final - rss_baseline) / (1024 * 1024)));
+    }
 #ifdef USE_CUBLAS
-    printf("GPU:      cuBLAS enabled\n");
+    {
+        /* Use total if both models loaded, otherwise whichever is available */
+        qwen_gpu_stats_t *gs = gpu_stats_total.n_weights > 0 ? &gpu_stats_total
+                             : gpu_stats_asr.n_weights > 0 ? &gpu_stats_asr
+                             : &gpu_stats_tts;
+        if (gs->n_weights > 0) {
+            printf("GPU:      cuBLAS — %d weights, %d MB VRAM\n",
+                   gs->n_weights,
+                   (int)(gs->vram_weights / (1024 * 1024)));
+        } else {
+            printf("GPU:      cuBLAS enabled\n");
+        }
+    }
 #ifdef USE_CUDA_KERNELS
     printf("          + custom CUDA kernels\n");
 #endif
