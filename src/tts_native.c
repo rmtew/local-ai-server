@@ -1004,6 +1004,7 @@ static int64_t *run_decode_loop(tts_native_ctx_t *ctx,
                                 float *trailing_embed, int trailing_seq_len,
                                 float *tts_pad_embed,
                                 float temperature, int top_k,
+                                tts_progress_fn progress, void *progress_data,
                                 int *out_n_steps) {
     int H_T = ctx->talker_config.dec_hidden;   /* talker hidden: 1024 or 2048 */
     int H_CP = ctx->cp_config.dec_hidden;      /* code predictor hidden: always 1024 */
@@ -1151,6 +1152,9 @@ static int64_t *run_decode_loop(tts_native_ctx_t *ctx,
         }
 
         n_steps++;
+
+        if (progress)
+            progress("decoding", n_steps, max_steps, progress_data);
 
         if (step + 1 >= max_steps) break;
 
@@ -1456,6 +1460,7 @@ void tts_native_free(tts_native_ctx_t *ctx) {
 int tts_native_decode(tts_native_ctx_t *ctx, const char *text,
                       const char *language, const float *speaker_embed,
                       float temperature, int top_k,
+                      tts_progress_fn progress, void *progress_data,
                       int64_t **codes_out, int *n_steps_out) {
     *codes_out = NULL;
     *n_steps_out = 0;
@@ -1497,6 +1502,7 @@ int tts_native_decode(tts_native_ctx_t *ctx, const char *text,
     int64_t *codes = run_decode_loop(ctx, prefill_data, prefill_len,
                                       trailing_data, trailing_len,
                                       tts_pad_embed, temperature, top_k,
+                                      progress, progress_data,
                                       &n_steps);
     free(prefill_data);
     free(trailing_data);

@@ -47,12 +47,15 @@ void tts_pipeline_free(TtsPipeline *tts);
  * temperature: sampling temperature (0.9 default)
  * top_k: top-k sampling (50 default)
  * speed: playback speed multiplier (1.0 default, adjusts WAV sample rate)
+ * progress/progress_data: optional callback for streaming progress (NULL to disable).
+ *   Called with phase "decoding" per step and "vocoder" once before vocoder runs.
  *
  * Returns 0 on success with result filled in.
  * Caller must free result->wav_data. */
 int tts_pipeline_synthesize(TtsPipeline *tts, const char *text,
                             const char *voice, const char *language,
                             float temperature, int top_k, float speed,
+                            tts_progress_fn progress, void *progress_data,
                             TtsResult *result);
 
 #endif /* LOCAL_AI_TTS_PIPELINE_H */

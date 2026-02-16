@@ -85,16 +85,16 @@ curl -X POST http://localhost:8090/v1/audio/speech \
   -d '{"input":"Hello world","voice":"alloy","seed":42}'
 ```
 
-### TTS Regression (`tts_regression.py`)
+### TTS Regression (`tools/tts_regression.py`)
 
 Automated regression harness comparing TTS output against reference WAVs using Pearson correlation and SNR metrics. Requires `seed` parameter for deterministic sampling.
 
 ```bash
-python tts_regression.py --generate-missing   # First-time: generate reference WAVs
-python tts_regression.py                       # Run regression checks
-python tts_regression.py --sanity-only         # Non-silence + duration checks only
-python tts_regression.py --refresh-refs        # Regenerate all references
-python tts_regression.py --case short_hello    # Run specific case
+python tools/tts_regression.py --generate-missing   # First-time: generate reference WAVs
+python tools/tts_regression.py                       # Run regression checks
+python tools/tts_regression.py --sanity-only         # Non-silence + duration checks only
+python tools/tts_regression.py --refresh-refs        # Regenerate all references
+python tools/tts_regression.py --case short_hello    # Run specific case
 ```
 
 Reference WAVs stored in `tts_samples/` (tracked in git).
@@ -125,7 +125,7 @@ Key TTS source files:
 | Method | Path | Handler |
 |--------|------|---------|
 | POST | `/v1/audio/transcriptions` | `handler_asr.c` — multipart/form-data |
-| POST | `/v1/audio/speech` | `handler_tts.c` — JSON body (`input`, `voice`, `language`, `temperature`, `top_k`, `speed`, `seed`). `seed` forces single-threaded inference for determinism. |
+| POST | `/v1/audio/speech` | `handler_tts.c` — JSON body (`input`, `voice`, `language`, `temperature`, `top_k`, `speed`, `seed`, `stream`). `seed` forces single-threaded inference for determinism. `stream` (bool) enables SSE response with per-step progress and base64 WAV. |
 | GET | `/v1/models` | `handler_asr.c` |
 | GET | `/health` | `handler_asr.c` |
 

@@ -202,6 +202,7 @@ void tts_pipeline_free(TtsPipeline *tts) {
 int tts_pipeline_synthesize(TtsPipeline *tts, const char *text,
                             const char *voice, const char *language,
                             float temperature, int top_k, float speed,
+                            tts_progress_fn progress, void *progress_data,
                             TtsResult *result) {
     memset(result, 0, sizeof(*result));
 
@@ -229,6 +230,7 @@ int tts_pipeline_synthesize(TtsPipeline *tts, const char *text,
     int64_t *codes = NULL;
     int rc = tts_native_decode(tts->native, text, language, speaker_embed,
                                 temperature, top_k,
+                                progress, progress_data,
                                 &codes, &n_steps);
     if (rc != 0 || !codes || n_steps == 0) {
         free(codes);
@@ -242,6 +244,8 @@ int tts_pipeline_synthesize(TtsPipeline *tts, const char *text,
     }
 
     /* 4. Vocoder decode: codes -> audio */
+    if (progress)
+        progress("vocoder", 0, 0, progress_data);
     double t_voc_start = platform_time_ms();
     double decode_ms = t_voc_start - t_start;
     if (tts->verbose) {

@@ -22,4 +22,10 @@ int jr_get_string(const char *json, size_t json_len,
 int jr_get_double(const char *json, size_t json_len,
                   const char *key, double *out);
 
+/* Extract a boolean value for the given key from a JSON object.
+ * Sets *out to 1 for true, 0 for false.
+ * Returns 0 on success, or -1 if key not found or not a boolean. */
+int jr_get_bool(const char *json, size_t json_len,
+                const char *key, int *out);
+
 #endif /* LOCAL_AI_JSON_READER_H */

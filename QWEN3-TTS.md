@@ -120,6 +120,34 @@ Total upsample factor: 2 * 2 * 8 * 5 * 4 * 3 = 1920x (12.5 Hz codec rate to 24 k
 - **LayerNorm**: Per-timestep normalization across channels (for ConvNeXt).
 - **GELU**: Exact form using `erff`.
 
+### Streaming (SSE)
+
+When `"stream": true` is set in the request JSON body, the server sends an SSE (Server-Sent Events) response with progress updates during talker decode, followed by base64-encoded WAV audio on completion.
+
+**Event format:**
+```
+data: {"phase":"decoding","step":1,"max_steps":200}
+data: {"phase":"decoding","step":2,"max_steps":200}
+...
+data: {"phase":"vocoder"}
+data: {"phase":"done","n_steps":50,"n_samples":96000,"elapsed_ms":3500.0,"audio":"UklGRi4A..."}
+data: [DONE]
+```
+
+- `decoding` events fire once per autoregressive step (~100-300ms each)
+- `vocoder` fires once when decode completes and vocoder starts
+- `done` contains the complete WAV file as a base64-encoded string, plus synthesis metadata
+- `[DONE]` is the terminal sentinel (matches OpenAI SSE convention)
+
+**Example (curl):**
+```bash
+curl -N -X POST http://localhost:8090/v1/audio/speech \
+  -H "Content-Type: application/json" \
+  -d '{"input":"Hello world","voice":"alloy","stream":true}'
+```
+
+The non-streaming path (`"stream": false` or omitted) is unchanged — returns `audio/wav` binary response directly.
+
 ## Performance
 
 All benchmarks on RTX 3070 Laptop GPU (8192 MB VRAM, compute 8.6) with cuBLAS + custom CUDA kernels. Inference is single-threaded with `seed` for deterministic output. Median of 3 runs after warmup.
@@ -237,7 +265,13 @@ The noise is a **model characteristic**, not an implementation bug:
 - **Instruct model variants**: Qwen also provides `0.6B-Instruct` and `1.7B-Instruct` models which may have different quality characteristics. These use a chat-template prompt format and could be worth testing.
 - **Even longer audio**: Default raised from 50 to 200 steps (~16s). No degeneration detected at 200 steps. Could push further (KV cache and buffers auto-grow), but quality at 300+ steps is untested.
 - **Vocoder GPU acceleration**: The vocoder currently runs on CPU (OpenBLAS). Moving convolutions to GPU (cuBLAS or custom CUDA kernels) could significantly reduce total inference time, especially for longer audio.
-- **Streaming output**: Generate and send audio chunks as decode steps complete, rather than waiting for the full sequence.
+- **Chunk-based vocoder streaming**: The current SSE streaming (see below) sends progress events during talker decode but runs the vocoder as a single batch, delivering the complete audio at the end. True audio streaming would vocode every N steps (e.g. 25 steps = 2s audio) while the talker continues decoding. This is architecturally feasible — the entire vocoder pipeline is causal (causal convolutions, causal attention in pre-transformer) — but requires:
+  - KV cache for the 8-layer pre-transformer (~13 MB, persisted across chunks per layer)
+  - Ring buffers for causal convolution state at each boundary (~1-2 MB total)
+  - ConvTranspose1d boundary stitching for upsample/BigVGAN stages
+  - Reworked buffer management (chunk-sized vs full-sequence)
+
+  Runtime cost is neutral: total FLOPs are identical, GEMM efficiency drops ~0-5% from smaller batch sizes, and peak memory actually decreases (~50 MB vs ~280 MB) because BigVGAN working buffers scale with chunk size instead of full T. Implementation cost is ~2000 lines across vocoder files.
 
 ## Source Files
 

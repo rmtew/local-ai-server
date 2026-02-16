@@ -1,6 +1,7 @@
 /*
  * TTS Request Handler
  * Parses OpenAI-compatible speech synthesis requests and returns WAV audio.
+ * Supports streaming via SSE when "stream":true is set in the request body.
  */
 
 #define _CRT_SECURE_NO_WARNINGS
@@ -13,6 +14,78 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+
+/* ---- Base64 encoder ---- */
+
+static const char b64_table[] =
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+
+/* Encode binary data to base64. Returns number of chars written.
+ * out must have room for at least 4*((len+2)/3) bytes. */
+static size_t base64_encode(char *out, const unsigned char *in, size_t len) {
+    size_t i, j = 0;
+    for (i = 0; i + 2 < len; i += 3) {
+        uint32_t v = ((uint32_t)in[i] << 16) | ((uint32_t)in[i+1] << 8) | in[i+2];
+        out[j++] = b64_table[(v >> 18) & 0x3F];
+        out[j++] = b64_table[(v >> 12) & 0x3F];
+        out[j++] = b64_table[(v >> 6) & 0x3F];
+        out[j++] = b64_table[v & 0x3F];
+    }
+    if (i < len) {
+        uint32_t v = (uint32_t)in[i] << 16;
+        if (i + 1 < len) v |= (uint32_t)in[i+1] << 8;
+        out[j++] = b64_table[(v >> 18) & 0x3F];
+        out[j++] = b64_table[(v >> 12) & 0x3F];
+        out[j++] = (i + 1 < len) ? b64_table[(v >> 6) & 0x3F] : '=';
+        out[j++] = '=';
+    }
+    return j;
+}
+
+/* ---- SSE streaming support ---- */
+
+typedef struct {
+    SOCKET client;
+} tts_stream_ctx_t;
+
+static void tts_stream_progress(const char *phase, int step, int max_steps,
+                                void *userdata) {
+    tts_stream_ctx_t *sctx = (tts_stream_ctx_t *)userdata;
+    char buf[256];
+    int len;
+    if (strcmp(phase, "decoding") == 0) {
+        len = snprintf(buf, sizeof(buf),
+            "{\"phase\":\"decoding\",\"step\":%d,\"max_steps\":%d}",
+            step, max_steps);
+    } else {
+        len = snprintf(buf, sizeof(buf), "{\"phase\":\"%s\"}", phase);
+    }
+    http_send_sse_event(sctx->client, buf, (size_t)len);
+}
+
+/* Send the final SSE event containing base64-encoded WAV audio and metadata. */
+static void send_audio_sse(SOCKET client, const TtsResult *result) {
+    size_t b64_len = 4 * ((result->wav_len + 2) / 3);
+    /* {"phase":"done","n_steps":NNN,"n_samples":NNNNNNN,"elapsed_ms":NNNN.N,"audio":"..."}  */
+    size_t prefix_max = 128;
+    size_t total = prefix_max + b64_len + 4; /* 4 for closing "}\0 + margin */
+    char *buf = (char *)malloc(total);
+    if (!buf) return;
+
+    int off = snprintf(buf, prefix_max,
+        "{\"phase\":\"done\",\"n_steps\":%d,\"n_samples\":%d,"
+        "\"elapsed_ms\":%.1f,\"audio\":\"",
+        result->n_steps, result->n_samples, result->elapsed_ms);
+
+    off += (int)base64_encode(buf + off, result->wav_data, result->wav_len);
+    buf[off++] = '"';
+    buf[off++] = '}';
+
+    http_send_sse_event(client, buf, (size_t)off);
+    free(buf);
+}
+
+/* ---- Main handler ---- */
 
 void handle_tts_speech(SOCKET client, const HttpRequest *request,
                        struct HandlerContext *ctx) {
@@ -48,6 +121,7 @@ void handle_tts_speech(SOCKET client, const HttpRequest *request,
     double seed = -1.0;
     double temperature = 0.9;
     double top_k_d = 50.0;
+    int stream = 0;
 
     int input_len = jr_get_string((const char *)request->body, request->body_len,
                                    "input", input_text, sizeof(input_text));
@@ -65,6 +139,8 @@ void handle_tts_speech(SOCKET client, const HttpRequest *request,
                    "temperature", &temperature);
     jr_get_double((const char *)request->body, request->body_len,
                    "top_k", &top_k_d);
+    jr_get_bool((const char *)request->body, request->body_len,
+                 "stream", &stream);
 
     if (input_len <= 0 || input_text[0] == '\0') {
         http_send_json_error(client, 400,
@@ -86,7 +162,7 @@ void handle_tts_speech(SOCKET client, const HttpRequest *request,
     if (top_k < 1) top_k = 50;
 
     if (ctx->verbose) {
-        printf("  TTS request: input=\"%.60s%s\", voice=%s, lang=%s, temp=%.2f, top_k=%d, speed=%.1f, seed=%d\n",
+        printf("  TTS request: input=\"%.60s%s\", voice=%s, lang=%s, temp=%.2f, top_k=%d, speed=%.1f, seed=%d, stream=%d\n",
                input_text,
                strlen(input_text) > 60 ? "..." : "",
                voice[0] ? voice : "default",
@@ -94,7 +170,8 @@ void handle_tts_speech(SOCKET client, const HttpRequest *request,
                temperature,
                top_k,
                speed,
-               seed >= 0.0 ? (int)seed : -1);
+               seed >= 0.0 ? (int)seed : -1,
+               stream);
     }
 
     /* Seed RNG and force single-threaded for deterministic output.
@@ -106,6 +183,17 @@ void handle_tts_speech(SOCKET client, const HttpRequest *request,
         qwen_set_threads(1);
     }
 
+    /* Set up streaming if requested */
+    tts_stream_ctx_t sctx;
+    tts_progress_fn progress_fn = NULL;
+    void *progress_data = NULL;
+    if (stream) {
+        http_send_sse_headers(client);
+        sctx.client = client;
+        progress_fn = tts_stream_progress;
+        progress_data = &sctx;
+    }
+
     /* Run synthesis */
     TtsResult result;
     const char *v = voice[0] ? voice : NULL;
@@ -113,15 +201,23 @@ void handle_tts_speech(SOCKET client, const HttpRequest *request,
     int rc = tts_pipeline_synthesize(ctx->tts, input_text, v, lang,
                                       (float)temperature, top_k,
                                       (float)speed,
+                                      progress_fn, progress_data,
                                       &result);
 
     if (saved_threads > 0) {
         qwen_set_threads(saved_threads);
     }
+
     if (rc != 0) {
-        http_send_json_error(client, 500,
-            "Speech synthesis failed",
-            "server_error");
+        if (stream) {
+            const char *err = "{\"error\":\"Speech synthesis failed\"}";
+            http_send_sse_event(client, err, strlen(err));
+            http_send_sse_event(client, "[DONE]", 6);
+        } else {
+            http_send_json_error(client, 500,
+                "Speech synthesis failed",
+                "server_error");
+        }
         return;
     }
 
@@ -131,8 +227,14 @@ void handle_tts_speech(SOCKET client, const HttpRequest *request,
                (double)result.wav_len / 1024.0);
     }
 
-    /* Send WAV response */
-    http_send_response(client, 200, "audio/wav",
-                       (const char *)result.wav_data, result.wav_len);
+    if (stream) {
+        /* Send audio as base64 in final SSE event, then [DONE] */
+        send_audio_sse(client, &result);
+        http_send_sse_event(client, "[DONE]", 6);
+    } else {
+        /* Send WAV response */
+        http_send_response(client, 200, "audio/wav",
+                           (const char *)result.wav_data, result.wav_len);
+    }
     free(result.wav_data);
 }

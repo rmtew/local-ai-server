@@ -15,12 +15,17 @@ Usage examples:
   # Sanity-only checks (no reference comparison)
   python tts_regression.py --sanity-only
 
+  # Stream regression: test SSE streaming, compare WAV vs references
+  python tts_regression.py --stream
+
 Requires a running local-ai-server with --tts-model loaded.
 """
 
 from __future__ import annotations
 
 import argparse
+import base64
+import http.client
 import json
 import math
 import os
@@ -246,6 +251,140 @@ def tts_request(
     except Exception as e:
         print(f"  {C_RED}Request error: {e}{C_RESET}")
         return None
+
+
+class StreamResult(NamedTuple):
+    """Result of a streaming TTS request."""
+    wav_data: bytes                 # Decoded WAV from base64
+    n_decode_events: int            # Number of "decoding" progress events
+    final_step: int                 # Last step value from decoding events
+    max_steps: int                  # max_steps from decoding events
+    had_vocoder_event: bool         # Whether "vocoder" phase event was seen
+    had_done_sentinel: bool         # Whether [DONE] sentinel was seen
+    event_order_ok: bool            # Whether events were in correct order
+
+
+def tts_request_stream(
+    server: str, text: str, speed: float, seed: int, timeout_s: int,
+    temperature: float = 0.3,
+) -> Optional[StreamResult]:
+    """Send a streaming TTS request, parse SSE events, return decoded WAV
+    and protocol metadata. Returns None on connection/protocol error."""
+    if server.startswith("http://"):
+        host_port = server[7:]
+    else:
+        host_port = server
+    if ":" in host_port:
+        host, port_str = host_port.split(":", 1)
+        port = int(port_str)
+    else:
+        host, port = host_port, 80
+
+    payload = json.dumps({
+        "input": text,
+        "voice": "alloy",
+        "speed": speed,
+        "seed": seed,
+        "stream": True,
+        "temperature": temperature,
+    }).encode("utf-8")
+
+    try:
+        conn = http.client.HTTPConnection(host, port, timeout=timeout_s)
+        conn.request("POST", "/v1/audio/speech", body=payload,
+                     headers={"Content-Type": "application/json"})
+        resp = conn.getresponse()
+    except Exception as e:
+        print(f"  {C_RED}Stream connect error: {e}{C_RESET}")
+        return None
+
+    if resp.status != 200:
+        body = resp.read().decode("utf-8", errors="replace")
+        print(f"  {C_RED}Stream HTTP {resp.status}: {body[:200]}{C_RESET}")
+        conn.close()
+        return None
+
+    ct = resp.getheader("Content-Type", "")
+    if "text/event-stream" not in ct:
+        print(f"  {C_RED}Not SSE: Content-Type={ct}{C_RESET}")
+        resp.read()
+        conn.close()
+        return None
+
+    # Parse SSE events
+    decode_steps = []
+    max_steps_val = 0
+    had_vocoder = False
+    done_event = None
+    had_done_sentinel = False
+    phases_seen = []  # for order checking
+
+    buf = b""
+    while True:
+        chunk = resp.read(4096)
+        if not chunk:
+            break
+        buf += chunk
+        while b"\n\n" in buf:
+            event_data, buf = buf.split(b"\n\n", 1)
+            for line in event_data.split(b"\n"):
+                line_str = line.decode("utf-8", errors="replace")
+                if not line_str.startswith("data: "):
+                    continue
+                payload_str = line_str[6:]
+                if payload_str == "[DONE]":
+                    had_done_sentinel = True
+                    phases_seen.append("[DONE]")
+                    continue
+                try:
+                    obj = json.loads(payload_str)
+                except json.JSONDecodeError:
+                    continue
+                phase = obj.get("phase", "")
+                phases_seen.append(phase)
+                if phase == "decoding":
+                    decode_steps.append(obj.get("step", 0))
+                    max_steps_val = obj.get("max_steps", max_steps_val)
+                elif phase == "vocoder":
+                    had_vocoder = True
+                elif phase == "done":
+                    done_event = obj
+
+    conn.close()
+
+    if done_event is None or "audio" not in done_event:
+        print(f"  {C_RED}Stream: no done event with audio{C_RESET}")
+        return None
+
+    try:
+        wav_data = base64.b64decode(done_event["audio"])
+    except Exception as e:
+        print(f"  {C_RED}Base64 decode failed: {e}{C_RESET}")
+        return None
+
+    # Check event ordering: all decoding before vocoder before done
+    order_ok = True
+    seen_vocoder = False
+    seen_done = False
+    for p in phases_seen:
+        if p == "decoding" and (seen_vocoder or seen_done):
+            order_ok = False
+        elif p == "vocoder":
+            seen_vocoder = True
+            if seen_done:
+                order_ok = False
+        elif p == "done":
+            seen_done = True
+
+    return StreamResult(
+        wav_data=wav_data,
+        n_decode_events=len(decode_steps),
+        final_step=decode_steps[-1] if decode_steps else 0,
+        max_steps=max_steps_val,
+        had_vocoder_event=had_vocoder,
+        had_done_sentinel=had_done_sentinel,
+        event_order_ok=order_ok,
+    )
 
 
 def check_server(server: str, timeout_s: int = 5) -> bool:
@@ -588,6 +727,11 @@ def parse_args() -> argparse.Namespace:
     )
 
     p.add_argument(
+        "--stream",
+        action="store_true",
+        help="Test streaming (SSE) mode: verify protocol + byte-identical WAV vs references",
+    )
+    p.add_argument(
         "--skip-sanity",
         action="store_true",
         help="Skip sanity checks during regression",
@@ -606,6 +750,101 @@ def parse_args() -> argparse.Namespace:
     )
 
     return p.parse_args()
+
+
+def run_stream_regression(
+    cases: List[TestCase],
+    server: str,
+    samples_dir: Path,
+    timeout_s: int,
+    verbose: bool,
+) -> int:
+    """Run streaming regression: for each case, request with stream=true and
+    compare the decoded WAV against the stored reference. Also validates SSE
+    protocol correctness. Returns number of failures."""
+    total = len(cases)
+    failures = 0
+
+    for idx, tc in enumerate(cases):
+        ref_path = samples_dir / f"{tc.id}.wav"
+        tag_start = f"{C_BCYAN}[STREAM {idx + 1}/{total}]{C_RESET}"
+
+        if not ref_path.exists():
+            tag_skip = f"{C_BYELLOW}[SKIP   {idx + 1}/{total}]{C_RESET}"
+            print(
+                f"{tag_skip} {C_BWHITE}{tc.id}{C_RESET}"
+                f" | {C_YELLOW}no reference (run without --stream first){C_RESET}"
+            )
+            continue
+
+        print(f"{tag_start} {C_BWHITE}{tc.id}{C_RESET} ...", end="", flush=True)
+
+        t0 = time.monotonic()
+        sr = tts_request_stream(server, tc.text, tc.speed, SEED, timeout_s)
+        elapsed = time.monotonic() - t0
+
+        if sr is None:
+            tag_fail = f"{C_BRED}[FAIL   {idx + 1}/{total}]{C_RESET}"
+            print(
+                f"\r{tag_fail} {C_BWHITE}{tc.id}{C_RESET}"
+                f" | {C_RED}streaming request failed{C_RESET}"
+                f" | {C_DIM}{fmt_time(elapsed)}{C_RESET}"
+            )
+            failures += 1
+            continue
+
+        # Protocol checks
+        issues = []
+        if sr.n_decode_events == 0:
+            issues.append("no decode events")
+        if not sr.had_vocoder_event:
+            issues.append("no vocoder event")
+        if not sr.had_done_sentinel:
+            issues.append("no [DONE]")
+        if not sr.event_order_ok:
+            issues.append("wrong event order")
+
+        # Compare WAV against reference
+        ref_data = ref_path.read_bytes()
+        wav_match = sr.wav_data == ref_data
+
+        if verbose:
+            print()
+            print(
+                f"    decode events: {sr.n_decode_events}, "
+                f"steps: {sr.final_step}/{sr.max_steps}, "
+                f"vocoder: {sr.had_vocoder_event}, "
+                f"[DONE]: {sr.had_done_sentinel}"
+            )
+            print(
+                f"    WAV: {len(sr.wav_data)} bytes "
+                f"(ref: {len(ref_data)} bytes, match: {wav_match})"
+            )
+
+        if wav_match and not issues:
+            tag_ok = f"{C_BGREEN}[OK     {idx + 1}/{total}]{C_RESET}"
+            print(
+                f"\r{tag_ok} {C_BWHITE}{tc.id}{C_RESET}"
+                f" | {C_GREEN}WAV identical{C_RESET}"
+                f" | {sr.n_decode_events} events, {sr.final_step} steps"
+                f" | {C_DIM}{fmt_time(elapsed)}{C_RESET}"
+            )
+        else:
+            tag_fail = f"{C_BRED}[FAIL   {idx + 1}/{total}]{C_RESET}"
+            reasons = []
+            if not wav_match:
+                reasons.append(
+                    f"WAV differs ({len(sr.wav_data)} vs {len(ref_data)} bytes)"
+                )
+            reasons.extend(issues)
+            print(
+                f"\r{tag_fail} {C_BWHITE}{tc.id}{C_RESET}"
+                f" | {C_RED}{'; '.join(reasons)}{C_RESET}"
+                f" | {C_DIM}{fmt_time(elapsed)}{C_RESET}"
+            )
+            failures += 1
+
+    return failures
 
 
 def main() -> int:
@@ -634,6 +873,8 @@ def main() -> int:
         mode_str = "refresh-refs"
     elif args.sanity_only:
         mode_str = "sanity-only"
+    elif args.stream:
+        mode_str = "stream"
 
     print(f"{C_BOLD}TTS Regression Suite{C_RESET} ({mode_str})")
     print(f"Server: {args.server}")
@@ -689,6 +930,34 @@ def main() -> int:
             print(
                 f"{C_BRED}Reference generation: "
                 f"{failures}/{len(cases)} failed{C_RESET}"
+                f"  ({fmt_time(elapsed_total)} total)"
+            )
+        return 1 if failures else 0
+
+    # Streaming regression mode
+    if args.stream:
+        failures = run_stream_regression(
+            cases=cases,
+            server=args.server,
+            samples_dir=samples_dir,
+            timeout_s=args.timeout_s,
+            verbose=args.verbose,
+        )
+
+        elapsed_total = time.monotonic() - t_total
+        print()
+        tested = len(cases)
+        passed = tested - failures
+        if failures == 0:
+            print(
+                f"{C_BGREEN}Stream regression PASSED: "
+                f"{passed}/{tested} test cases{C_RESET}"
+                f"  ({fmt_time(elapsed_total)} total)"
+            )
+        else:
+            print(
+                f"{C_BRED}Stream regression FAILED: "
+                f"{failures}/{tested} test cases{C_RESET}"
                 f"  ({fmt_time(elapsed_total)} total)"
             )
         return 1 if failures else 0

@@ -171,6 +171,16 @@ typedef struct {
 } tts_native_ctx_t;
 
 /* ========================================================================
+ * Progress Callback
+ * ======================================================================== */
+
+/* Called during synthesis to report progress.
+ * phase: "decoding" (per-step) or "vocoder" (once before vocoder runs).
+ * step/max_steps: current step and upper bound during "decoding" phase. */
+typedef void (*tts_progress_fn)(const char *phase, int step, int max_steps,
+                                void *userdata);
+
+/* ========================================================================
  * API
  * ======================================================================== */
 
@@ -189,12 +199,14 @@ void tts_native_free(tts_native_ctx_t *ctx);
  * language: language string ("auto", "english", "chinese", etc.) or NULL for auto.
  * speaker_embed: optional speaker embedding (NULL for default voice).
  *                Must be spk_embed_dim floats (1024 for 0.6B, 2048 for 1.7B).
+ * progress/progress_data: optional callback for streaming progress (NULL to disable).
  * Returns 0 on success. Caller must free *codes_out.
  * codes_out: [n_steps * 16] int64 array of codec tokens
  * n_steps_out: number of decode steps */
 int tts_native_decode(tts_native_ctx_t *ctx, const char *text,
                       const char *language, const float *speaker_embed,
                       float temperature, int top_k,
+                      tts_progress_fn progress, void *progress_data,
                       int64_t **codes_out, int *n_steps_out);
 
 #endif /* LOCAL_AI_TTS_NATIVE_H */

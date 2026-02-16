@@ -132,3 +132,20 @@ int jr_get_double(const char *json, size_t json_len,
     *out = strtod(buf, &endp);
     return (endp > buf) ? 0 : -1;
 }
+
+int jr_get_bool(const char *json, size_t json_len,
+                const char *key, int *out) {
+    const char *end = json + json_len;
+    const char *val = find_key(json, json_len, key);
+    if (!val || val >= end) return -1;
+
+    if (val + 4 <= end && memcmp(val, "true", 4) == 0) {
+        *out = 1;
+        return 0;
+    }
+    if (val + 5 <= end && memcmp(val, "false", 5) == 0) {
+        *out = 0;
+        return 0;
+    }
+    return -1;
+}
