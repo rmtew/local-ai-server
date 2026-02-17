@@ -47,8 +47,13 @@ void jw_double(JsonWriter *w, double value, int precision);
 void jw_bool(JsonWriter *w, int value);
 void jw_null(JsonWriter *w);
 
+/* Write a pre-escaped string value (no escape scanning).
+ * Use for known-safe content like base64 where escaping is unnecessary. */
+void jw_string_raw(JsonWriter *w, const char *value, size_t len);
+
 /* Field helpers (key + value, auto comma) */
 void jw_field_string(JsonWriter *w, const char *key, const char *value);
+void jw_field_string_raw(JsonWriter *w, const char *key, const char *value, size_t len);
 void jw_field_int(JsonWriter *w, const char *key, int64_t value);
 void jw_field_double(JsonWriter *w, const char *key, double value, int precision);
 void jw_field_bool(JsonWriter *w, const char *key, int value);

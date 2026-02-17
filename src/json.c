@@ -140,6 +140,23 @@ void jw_null(JsonWriter *w) {
     jw_append_str(w, "null");
 }
 
+void jw_string_raw(JsonWriter *w, const char *value, size_t len) {
+    if (!value || len == 0) {
+        jw_append_str(w, "null");
+        return;
+    }
+    jw_append_char(w, '"');
+    jw_append(w, value, len);
+    jw_append_char(w, '"');
+}
+
+void jw_field_string_raw(JsonWriter *w, const char *key, const char *value, size_t len) {
+    jw_obj_sep(w);
+    jw_string(w, key);
+    jw_append_char(w, ':');
+    jw_string_raw(w, value, len);
+}
+
 void jw_field_string(JsonWriter *w, const char *key, const char *value) {
     jw_obj_sep(w);
     jw_string(w, key);

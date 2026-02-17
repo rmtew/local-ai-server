@@ -5,11 +5,15 @@
  */
 
 #define _CRT_SECURE_NO_WARNINGS
+#ifdef _MSC_VER
+#define strdup _strdup
+#endif
 #include "handler_tts.h"
 #include "handler_asr.h"
 #include "json_reader.h"
 #include "json.h"
 #include "qwen_asr_kernels.h"
+#include "qwen_asr_audio.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -143,6 +147,9 @@ void handle_tts_speech(SOCKET client, const HttpRequest *request,
                    "top_k", &top_k_d);
     jr_get_bool((const char *)request->body, request->body_len,
                  "stream", &stream);
+    int timestamps = 0;
+    jr_get_bool((const char *)request->body, request->body_len,
+                 "timestamps", &timestamps);
 
     if (input_len <= 0 || input_text[0] == '\0') {
         http_send_json_error(client, 400,
@@ -160,20 +167,38 @@ void handle_tts_speech(SOCKET client, const HttpRequest *request,
         return;
     }
 
+    if (timestamps && !ctx->asr_ctx) {
+        http_send_json_error(client, 400,
+            "timestamps requires ASR model (start server with --model=<dir>)",
+            "invalid_request_error");
+        return;
+    }
+    if (timestamps && stream) {
+        http_send_json_error(client, 400,
+            "timestamps and stream cannot be used together",
+            "invalid_request_error");
+        return;
+    }
+
     int top_k = (int)top_k_d;
     if (top_k < 1) top_k = 50;
 
+    /* Arrival line (always) */
+    {
+        const char *tag = timestamps ? "TTS+ASR" : "TTS";
+        const char *v = voice[0] ? voice : "default";
+        if (language[0]) {
+            printf("[%s] voice=%s, lang=%s, \"%.40s%s\"\n", tag, v, language,
+                   input_text, strlen(input_text) > 40 ? "..." : "");
+        } else {
+            printf("[%s] voice=%s, \"%.40s%s\"\n", tag, v,
+                   input_text, strlen(input_text) > 40 ? "..." : "");
+        }
+    }
     if (ctx->verbose) {
-        printf("  TTS request: input=\"%.60s%s\", voice=%s, lang=%s, temp=%.2f, top_k=%d, speed=%.1f, seed=%d, stream=%d\n",
-               input_text,
-               strlen(input_text) > 60 ? "..." : "",
-               voice[0] ? voice : "default",
-               language[0] ? language : "auto",
-               temperature,
-               top_k,
-               speed,
-               seed >= 0.0 ? (int)seed : -1,
-               stream);
+        printf("  params: temp=%.2f, top_k=%d, speed=%.1f, seed=%d, stream=%d\n",
+               temperature, top_k, speed,
+               seed >= 0.0 ? (int)seed : -1, stream);
     }
 
     /* Seed RNG for each request.  Without this, rand() state carries over
@@ -232,24 +257,171 @@ void handle_tts_speech(SOCKET client, const HttpRequest *request,
         return;
     }
 
-    if (stream) {
+    if (timestamps) {
+        /* Run generated WAV through ASR to get word timestamps */
+        double t_asr_start = platform_time_ms();
+
+        int asr_n = 0;
+        float *asr_samples = qwen_parse_wav_buffer(result.wav_data,
+                                                    result.wav_len, &asr_n);
+        if (!asr_samples || asr_n <= 0) {
+            http_send_json_error(client, 500,
+                "Failed to parse TTS output for ASR",
+                "server_error");
+            free(result.wav_data);
+            return;
+        }
+
+        /* Set ASR language to match TTS language if specified */
+        char *prev_language = NULL;
+        if (language[0] && ctx->asr_ctx->force_language) {
+            prev_language = strdup(ctx->asr_ctx->force_language);
+        }
+        if (language[0]) {
+            qwen_set_force_language(ctx->asr_ctx, language);
+        }
+
+        char *asr_text = qwen_transcribe_audio(ctx->asr_ctx,
+                                                asr_samples, asr_n);
+        free(asr_samples);
+
+        double t_asr_end = platform_time_ms();
+
+        const qwen_token_ts_t *ts = NULL;
+        int ts_count = 0;
+        if (asr_text) {
+            qwen_get_token_timestamps(ctx->asr_ctx, &ts, &ts_count);
+        }
+
+        /* Restore ASR language */
+        if (language[0]) {
+            qwen_set_force_language(ctx->asr_ctx, prev_language);
+            free(prev_language);
+        }
+
+        /* Build JSON response with base64 audio + word timestamps */
+        size_t b64_len = 4 * ((result.wav_len + 2) / 3);
+        char *b64_buf = (char *)malloc(b64_len + 1);
+        if (!b64_buf) {
+            free(asr_text);
+            free(result.wav_data);
+            http_send_json_error(client, 500, "Out of memory", "server_error");
+            return;
+        }
+        size_t b64_written = base64_encode(b64_buf, result.wav_data,
+                                            result.wav_len);
+
+        size_t buf_size = b64_written + 4096 + (size_t)ts_count * 256;
+        char *json_buf = (char *)malloc(buf_size);
+        if (!json_buf) {
+            free(b64_buf);
+            free(asr_text);
+            free(result.wav_data);
+            http_send_json_error(client, 500, "Out of memory", "server_error");
+            return;
+        }
+
+        JsonWriter w;
+        jw_init(&w, json_buf, buf_size);
+        jw_object_start(&w);
+
+        jw_field_string_raw(&w, "audio", b64_buf, b64_written);
+        free(b64_buf);
+
+        jw_field_string(&w, "text", asr_text ? asr_text : "");
+        jw_field_int(&w, "n_steps", result.n_steps);
+        jw_field_int(&w, "n_samples", result.n_samples);
+        jw_field_double(&w, "elapsed_ms", result.elapsed_ms, 1);
+        jw_field_double(&w, "asr_ms", t_asr_end - t_asr_start, 1);
+
+        if (ts && ts_count > 0 && asr_text) {
+            jw_field_array_start(&w, "words");
+            for (int i = 0; i < ts_count; i++) {
+                jw_array_sep(&w);
+                jw_object_start(&w);
+
+                int start_off = ts[i].byte_offset;
+                int end_off = (i + 1 < ts_count)
+                    ? ts[i + 1].byte_offset : (int)strlen(asr_text);
+                int word_len = end_off - start_off;
+
+                const char *word_start = asr_text + start_off;
+                while (word_len > 0 && (*word_start == ' '
+                       || *word_start == '\t')) {
+                    word_start++;
+                    word_len--;
+                }
+                while (word_len > 0 && (word_start[word_len - 1] == ' '
+                       || word_start[word_len - 1] == '\t')) {
+                    word_len--;
+                }
+
+                char word_buf[512];
+                if (word_len >= (int)sizeof(word_buf))
+                    word_len = (int)sizeof(word_buf) - 1;
+                if (word_len > 0)
+                    memcpy(word_buf, word_start, (size_t)word_len);
+                word_buf[word_len > 0 ? word_len : 0] = '\0';
+
+                jw_field_string(&w, "word", word_buf);
+                jw_field_double(&w, "start",
+                                ts[i].audio_ms / 1000.0, 3);
+                double end_time = (i + 1 < ts_count)
+                    ? ts[i + 1].audio_ms / 1000.0
+                    : ctx->asr_ctx->perf_audio_ms / 1000.0;
+                jw_field_double(&w, "end", end_time, 3);
+                jw_field_int(&w, "audio_ms", ts[i].audio_ms);
+
+                jw_object_end(&w);
+            }
+            jw_array_end(&w);
+        }
+
+        jw_object_end(&w);
+
+        http_send_response(client, 200, "application/json",
+                           json_buf, jw_length(&w));
+
+        double t_send_end = platform_time_ms();
+        printf("[TTS+ASR] %d steps, %d samples (%.1fs), synth=%.0fms asr=%.0fms send=%.0fms total=%.0fms (%d words)\n",
+               result.n_steps, result.n_samples,
+               (double)result.n_samples / 24000.0,
+               t_synth_end - t_synth_start,
+               t_asr_end - t_asr_start,
+               t_send_end - t_asr_end,
+               t_send_end - t_synth_start,
+               ts_count);
+
+        free(json_buf);
+        free(asr_text);
+        free(result.wav_data);
+    } else if (stream) {
         /* Send audio as base64 in final SSE event, then [DONE] */
         send_audio_sse(client, &result);
         http_send_sse_event(client, "[DONE]", 6);
+
+        double t_send_end = platform_time_ms();
+        printf("[TTS] %d steps, %d samples (%.1fs), synth=%.0fms send=%.0fms total=%.0fms (%.1f KB)\n",
+               result.n_steps, result.n_samples,
+               (double)result.n_samples / 24000.0,
+               t_synth_end - t_synth_start,
+               t_send_end - t_synth_end,
+               t_send_end - t_synth_start,
+               (double)result.wav_len / 1024.0);
+        free(result.wav_data);
     } else {
         /* Send WAV response */
         http_send_response(client, 200, "audio/wav",
                            (const char *)result.wav_data, result.wav_len);
+
+        double t_send_end = platform_time_ms();
+        printf("[TTS] %d steps, %d samples (%.1fs), synth=%.0fms send=%.0fms total=%.0fms (%.1f KB)\n",
+               result.n_steps, result.n_samples,
+               (double)result.n_samples / 24000.0,
+               t_synth_end - t_synth_start,
+               t_send_end - t_synth_end,
+               t_send_end - t_synth_start,
+               (double)result.wav_len / 1024.0);
+        free(result.wav_data);
     }
-    double t_send_end = platform_time_ms();
-
-    printf("  TTS: %d steps, %d samples (%.1fs), synth=%.0fms send=%.0fms total=%.0fms (%.1f KB)\n",
-           result.n_steps, result.n_samples,
-           (double)result.n_samples / 24000.0,
-           t_synth_end - t_synth_start,
-           t_send_end - t_synth_end,
-           t_send_end - t_synth_start,
-           (double)result.wav_len / 1024.0);
-
-    free(result.wav_data);
 }

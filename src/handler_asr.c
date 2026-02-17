@@ -172,11 +172,15 @@ static void handle_transcription(SOCKET client, const HttpRequest *request,
     int verbose_json = (strcmp(response_format, "verbose_json") == 0);
     int streaming = (strcmp(response_format, "streaming_verbose_json") == 0);
 
+    /* Arrival line (always) */
+    if (language[0]) {
+        printf("[ASR] lang=%s, %zu bytes\n", language, file_part->data_len);
+    } else {
+        printf("[ASR] %zu bytes\n", file_part->data_len);
+    }
     if (ctx->verbose) {
-        printf("  file: %s (%zu bytes), language: %s, format: %s, prompt: %s\n",
+        printf("  file: %s, format: %s, prompt: %s\n",
                file_part->filename[0] ? file_part->filename : "(unnamed)",
-               file_part->data_len,
-               language[0] ? language : "(auto)",
                response_format[0] ? response_format : "json",
                prompt[0] ? prompt : "(none)");
     }
@@ -314,9 +318,9 @@ static void handle_transcription(SOCKET client, const HttpRequest *request,
             }
         }
 
-        if (ctx->verbose && text) {
-            printf("  result: %s\n", text);
-            printf("  perf: %.0f ms total, %.0f ms encode, %.0f ms decode\n",
+        if (text) {
+            printf("[ASR] \"%.60s%s\" — %.0fms (enc=%.0f dec=%.0f)\n",
+                   text, strlen(text) > 60 ? "..." : "",
                    ctx->asr_ctx->perf_total_ms,
                    ctx->asr_ctx->perf_encode_ms,
                    ctx->asr_ctx->perf_decode_ms);
@@ -346,13 +350,11 @@ static void handle_transcription(SOCKET client, const HttpRequest *request,
         return;
     }
 
-    if (ctx->verbose) {
-        printf("  result: %s\n", text);
-        printf("  perf: %.0f ms total, %.0f ms encode, %.0f ms decode\n",
-               ctx->asr_ctx->perf_total_ms,
-               ctx->asr_ctx->perf_encode_ms,
-               ctx->asr_ctx->perf_decode_ms);
-    }
+    printf("[ASR] \"%.60s%s\" — %.0fms (enc=%.0f dec=%.0f)\n",
+           text, strlen(text) > 60 ? "..." : "",
+           ctx->asr_ctx->perf_total_ms,
+           ctx->asr_ctx->perf_encode_ms,
+           ctx->asr_ctx->perf_decode_ms);
 
     /* Build JSON response */
     if (verbose_json) {
