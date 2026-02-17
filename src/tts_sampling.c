@@ -9,23 +9,31 @@
 #include <stdlib.h>
 #include <string.h>
 #include <float.h>
+#include <stdint.h>
 
 /* Apply repetition penalty to logits for previously generated tokens.
  * Tokens in history[] get their logits divided (if positive) or
- * multiplied (if negative) by the penalty factor. */
+ * multiplied (if negative) by the penalty factor.
+ * Each unique token is penalized exactly once (matching reference
+ * implementations which use set-based deduplication). */
 void tts_apply_repetition_penalty(float *logits, int vocab_size,
                                   const int *history, int history_len,
                                   float penalty) {
     if (penalty <= 1.0f) return;
+    uint8_t *seen = (uint8_t *)calloc((size_t)vocab_size, 1);
+    if (!seen) return;
     for (int i = 0; i < history_len; i++) {
         int tok = history[i];
         if (tok < 0 || tok >= vocab_size) continue;
+        if (seen[tok]) continue;
+        seen[tok] = 1;
         if (logits[tok] > 0.0f) {
             logits[tok] /= penalty;
         } else {
             logits[tok] *= penalty;
         }
     }
+    free(seen);
 }
 
 /* Sample a token from logits with temperature scaling and top-k filtering.

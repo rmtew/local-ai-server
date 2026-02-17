@@ -143,7 +143,7 @@ Key TTS source files:
 | Method | Path | Handler |
 |--------|------|---------|
 | POST | `/v1/audio/transcriptions` | `handler_asr.c` — multipart/form-data |
-| POST | `/v1/audio/speech` | `handler_tts.c` — JSON body (`input`, `voice`, `language`, `temperature`, `top_k`, `speed`, `seed`, `stream`). `seed` forces single-threaded inference for determinism. `stream` (bool) enables SSE response with per-step progress and base64 WAV. |
+| POST | `/v1/audio/speech` | `handler_tts.c` — JSON body (`input`, `voice`, `language`, `temperature`, `top_k`, `speed`, `seed`, `stream`, `timestamps`). `seed` forces single-threaded inference for determinism. `stream` (bool) enables SSE response with per-step progress and base64 WAV. `language` accepted for ASR hints in timestamps mode but TTS always uses auto-detection (nothink codec prefix) — see QWEN3-TTS.md "Think vs Nothink" section. `timestamps` (bool) runs generated audio through ASR and returns JSON with base64 `audio`, `text`, and `words[]` array (each with `word`, `start`, `end`, `audio_ms`). Requires ASR model; incompatible with `stream`. |
 | GET | `/v1/models` | `handler_asr.c` |
 | GET | `/health` | `handler_asr.c` |
 

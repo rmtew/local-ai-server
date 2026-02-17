@@ -55,7 +55,7 @@ Models from HuggingFace:
 
 ### Stage 1: Text Tokenization and Embedding
 
-Input text is tokenized using the Qwen2 BPE tokenizer (151,643 tokens). Token embeddings are computed via a two-layer text projection (native C) and combined with codec prefix tokens (`nothink`, `think_bos`, `think_eos`, `pad`, `bos`).
+Input text is tokenized using the Qwen2 BPE tokenizer (151,643 tokens). Token embeddings are computed via a two-layer text projection (native C) and combined with codec prefix tokens (`nothink`, `think_bos`, `think_eos`, `pad`, `bos`). Always uses the nothink (auto-detect) codec prefix — see "Think vs Nothink" section below for rationale.
 
 ### Stage 2: Talker LM (Native C + cuBLAS)
 
@@ -251,6 +251,32 @@ The noise is a **model characteristic**, not an implementation bug:
 - F32 mode produces the same noise (not an FP16 artifact)
 - Codec token distributions are identical between noisy/clean seeds
 - Noise is seed-dependent (2/4 seeds), suggesting certain token *sequences* cause the shared vocoder to render reverb-like artifacts
+
+### Think vs Nothink Codec Prefix (Language Parameter)
+
+The talker LM's codec prefix has two modes that control language handling:
+
+- **Nothink** (language=auto): `[nothink(2155), think_bos(2156), think_eos(2157), pad(2148), bos(2149)]` — 5 tokens. Model auto-detects language from text.
+- **Think** (language specified): `[think(2154), think_bos(2156), language_id, think_eos(2157), pad(2148), bos(2149)]` — 6 tokens. Explicit language token inserted.
+
+The official Python reference (`QwenLM/Qwen3-TTS`) uses nothink when `language="auto"` and think when a language is specified. The C++ reference (`predict-woo/qwen3-tts.cpp`) hardcodes English (2050) and never tests other languages.
+
+**Known issue: CJK think path produces runaway generation on 0.6B-Base.** When Chinese or Japanese text is combined with the matching language token in think mode, the model fails to produce EOS, running to `max_steps` (200 steps = 16s audio for text that should produce <1s). Verified with deterministic seeds and multiple temperatures (0.1-0.9). EOS logit stays ranked 50-300 for 150+ steps. Specific findings:
+
+| Text | Language | Steps | Duration | Status |
+|------|----------|-------|----------|--------|
+| 你好 (Chinese) | auto (nothink) | 6 | 0.5s | OK |
+| 你好 (Chinese) | English | 13 | 1.0s | OK |
+| 你好 (Chinese) | Chinese | 152 | 12.1s | **FAIL** |
+| Hello world | Chinese | 15 | 1.2s | OK |
+| Hello world | English | 12 | 0.9s | OK |
+| こんにちは (Japanese) | Japanese | 200 | 16.0s | **FAIL** |
+| Guten Tag (German) | German | 10 | 0.8s | OK |
+| ni hao (Pinyin) | Chinese | 8 | 0.6s | OK |
+
+The failure is specific to CJK characters + matching CJK language in think mode. All other combinations work correctly. Code verified correct against both Python and C++ reference implementations (token IDs, codec prefix structure, embedding interleaving, sampling parameters, position IDs).
+
+**Resolution:** Server defaults to nothink (auto-detection) for all requests. The `language` API parameter is accepted for ASR language hints (timestamps mode) but the codec prefix always uses the nothink path. Auto-detection handles all tested languages correctly. The think path limitation is a 0.6B-Base model behavior, not an implementation bug.
 
 ### Debugging Tools
 

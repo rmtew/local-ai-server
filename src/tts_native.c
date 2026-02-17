@@ -762,7 +762,10 @@ static void code_predictor_forward(tts_native_ctx_t *ctx,
  * ======================================================================== */
 
 /* Resolve language string to codec language_id.
- * Returns language_id >= 0, or -1 for "auto" (nothink path). */
+ * Returns language_id >= 0, or -1 for "auto" (nothink path).
+ * NOTE: Currently unused — tts_native_decode always uses nothink (auto-detect)
+ * because the think path causes runaway generation on 0.6B-Base for CJK text.
+ * Retained for potential use with future models. See QWEN3-TTS.md. */
 static int resolve_language_id(const char *language) {
     if (!language || language[0] == '\0')
         return -1;  /* auto */
@@ -1485,7 +1488,12 @@ int tts_native_decode(tts_native_ctx_t *ctx, const char *text,
     float *prefill_data = NULL, *trailing_data = NULL, *tts_pad_embed = NULL;
     int prefill_len = 0, trailing_len = 0;
 
-    int lang_id = resolve_language_id(language);
+    /* Always use nothink (auto-detect) for codec prefix.  The think path
+     * with explicit language causes runaway generation on 0.6B-Base for CJK
+     * text + matching CJK language (EOS logit suppressed for 150+ steps).
+     * Auto-detection handles all tested languages correctly.  See QWEN3-TTS.md. */
+    int lang_id = -1;
+    (void)language;  /* language param still used by caller for ASR hints */
     int rc = build_prefill_embeddings(ctx, input_ids, n_ids, role_len,
                                        lang_id, speaker_embed,
                                        &prefill_data, &prefill_len,
