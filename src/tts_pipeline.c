@@ -85,6 +85,139 @@ static unsigned char *encode_wav(const float *samples, int n_samples,
     return wav;
 }
 
+/* ---- CustomVoice spk_id preset loading ---- */
+
+#define SPK_ID_MAX 32  /* max voices per CustomVoice model */
+
+/* Try to load voice presets from model config.json spk_id entries (CustomVoice model).
+ * Each spk_id maps a voice name to a codec embedding token index.
+ * Returns number of presets loaded (0 if not a CustomVoice model). */
+static int load_spk_id_presets(TtsPipeline *tts, const char *model_dir) {
+    char config_path[512];
+    snprintf(config_path, sizeof(config_path), "%s/config.json", model_dir);
+
+    FILE *f = fopen(config_path, "rb");
+    if (!f) return 0;
+
+    fseek(f, 0, SEEK_END);
+    long file_size = ftell(f);
+    fseek(f, 0, SEEK_SET);
+
+    if (file_size <= 0 || file_size > 1024 * 1024) {
+        fclose(f);
+        return 0;
+    }
+
+    char *json = (char *)malloc((size_t)file_size + 1);
+    if (!json) { fclose(f); return 0; }
+
+    if (fread(json, 1, (size_t)file_size, f) != (size_t)file_size) {
+        free(json);
+        fclose(f);
+        return 0;
+    }
+    json[file_size] = '\0';
+    fclose(f);
+
+    /* Find "spk_id" key (won't match "spk_is_dialect") */
+    const char *spk = strstr(json, "\"spk_id\"");
+    if (!spk) { free(json); return 0; }
+
+    /* Skip to colon and opening brace */
+    const char *p = spk + 8;  /* past "spk_id" */
+    const char *json_end = json + file_size;
+    while (p < json_end && *p != ':') p++;
+    if (p >= json_end) { free(json); return 0; }
+    p++;
+    while (p < json_end && (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r')) p++;
+    if (p >= json_end || *p != '{') { free(json); return 0; }
+    p++;
+
+    /* Find matching closing brace to bound the scan */
+    const char *end = (const char *)memchr(p, '}', (size_t)(json_end - p));
+    if (!end) { free(json); return 0; }
+
+    int embed_dim = tts->native->talker_config.dec_hidden;
+
+    /* Allocate for up to SPK_ID_MAX voices */
+    tts_voice_presets_t *vp = &tts->voice_presets;
+    vp->names = (char *)calloc(SPK_ID_MAX * TTS_PRESET_NAME_LEN, 1);
+    vp->embeds = (float *)malloc((size_t)SPK_ID_MAX * (size_t)embed_dim * sizeof(float));
+    if (!vp->names || !vp->embeds) {
+        free(vp->names); free(vp->embeds);
+        vp->names = NULL; vp->embeds = NULL;
+        free(json);
+        return 0;
+    }
+    vp->embed_dim = embed_dim;
+
+    /* Single pass: extract "name": token_id pairs */
+    const char *scan = p;
+    int idx = 0;
+    while (scan < end && idx < SPK_ID_MAX) {
+        /* Find opening quote of key */
+        const char *q = (const char *)memchr(scan, '"', (size_t)(end - scan));
+        if (!q) break;
+        q++;
+        const char *key_end = (const char *)memchr(q, '"', (size_t)(end - q));
+        if (!key_end) break;
+
+        /* Copy name */
+        size_t name_len = (size_t)(key_end - q);
+        if (name_len >= TTS_PRESET_NAME_LEN) name_len = TTS_PRESET_NAME_LEN - 1;
+        memcpy(vp->names + (size_t)idx * TTS_PRESET_NAME_LEN, q, name_len);
+
+        /* Find colon and token_id number */
+        scan = key_end + 1;
+        while (scan < end && *scan != ':') scan++;
+        if (scan >= end) break;
+        scan++;
+        while (scan < end && (*scan == ' ' || *scan == '\t' || *scan == '\n' || *scan == '\r')) scan++;
+
+        char *num_end;
+        int token_id = (int)strtol(scan, &num_end, 10);
+        if (num_end == scan) break;
+        scan = num_end;
+
+        /* Bounds check token_id against codec embedding table */
+        if (token_id < 0 || token_id >= TTS_TALKER_VOCAB) {
+            fprintf(stderr, "TTS: spk_id '%.*s' has invalid token_id %d (max %d)\n",
+                    (int)name_len, q, token_id, TTS_TALKER_VOCAB - 1);
+            while (scan < end && *scan != ',') scan++;
+            if (scan < end) scan++;
+            continue;
+        }
+
+        /* Extract codec embedding: BF16 -> F32 */
+        const uint16_t *src = tts->native->codec_embed_bf16 + (size_t)token_id * (size_t)embed_dim;
+        float *dst = vp->embeds + (size_t)idx * (size_t)embed_dim;
+        for (int i = 0; i < embed_dim; i++) {
+            uint32_t bits = ((uint32_t)src[i]) << 16;
+            memcpy(&dst[i], &bits, sizeof(float));
+        }
+
+        idx++;
+
+        /* Skip to next entry */
+        while (scan < end && *scan != ',') scan++;
+        if (scan < end) scan++;
+    }
+
+    if (idx == 0) {
+        free(vp->names); free(vp->embeds);
+        vp->names = NULL; vp->embeds = NULL;
+        free(json);
+        return 0;
+    }
+
+    /* Shrink allocations to actual count */
+    vp->names = (char *)realloc(vp->names, (size_t)idx * TTS_PRESET_NAME_LEN);
+    vp->embeds = (float *)realloc(vp->embeds, (size_t)idx * (size_t)embed_dim * sizeof(float));
+    vp->n_presets = idx;
+    free(json);
+    return idx;
+}
+
 /* ---- Pipeline initialization ---- */
 
 int tts_pipeline_init(TtsPipeline *tts, const char *model_dir, int fp16, int verbose) {
@@ -154,25 +287,35 @@ int tts_pipeline_init(TtsPipeline *tts, const char *model_dir, int fp16, int ver
         }
     }
 
-    /* Load voice presets (optional) */
+    /* Load voice presets: try spk_id from model config (CustomVoice), then voice_presets.bin (Base) */
     {
-        char preset_path[512];
-        snprintf(preset_path, sizeof(preset_path), "%s/voice_presets.bin", model_dir);
-        if (tts_voice_presets_load(&tts->voice_presets, preset_path) == 0) {
-            /* Validate embed_dim matches model */
-            int model_embed = tts->native->spk_embed_dim;
-            if (tts->voice_presets.embed_dim != model_embed) {
-                fprintf(stderr, "TTS: WARNING: voice presets embed_dim=%d but model expects %d"
-                        " — presets will be ignored\n",
-                        tts->voice_presets.embed_dim, model_embed);
-                tts_voice_presets_free(&tts->voice_presets);
-            } else if (verbose) {
-                printf("TTS: loaded %d voice presets from %s (embed_dim=%d)\n",
-                       tts->voice_presets.n_presets, preset_path,
-                       tts->voice_presets.embed_dim);
+        int n_spk = load_spk_id_presets(tts, model_dir);
+        if (n_spk > 0) {
+            if (verbose) {
+                printf("TTS: loaded %d voice presets from spk_id:", n_spk);
+                for (int i = 0; i < n_spk; i++)
+                    printf(" %s", tts->voice_presets.names + i * TTS_PRESET_NAME_LEN);
+                printf("\n");
             }
-        } else if (verbose) {
-            printf("TTS: no voice presets found (voice cloning unavailable)\n");
+        } else {
+            char preset_path[512];
+            snprintf(preset_path, sizeof(preset_path), "%s/voice_presets.bin", model_dir);
+            if (tts_voice_presets_load(&tts->voice_presets, preset_path) == 0) {
+                /* Validate embed_dim matches model */
+                int model_embed = tts->native->spk_embed_dim;
+                if (tts->voice_presets.embed_dim != model_embed) {
+                    fprintf(stderr, "TTS: WARNING: voice presets embed_dim=%d but model expects %d"
+                            " — presets will be ignored\n",
+                            tts->voice_presets.embed_dim, model_embed);
+                    tts_voice_presets_free(&tts->voice_presets);
+                } else if (verbose) {
+                    printf("TTS: loaded %d voice presets from %s (embed_dim=%d)\n",
+                           tts->voice_presets.n_presets, preset_path,
+                           tts->voice_presets.embed_dim);
+                }
+            } else if (verbose) {
+                printf("TTS: no voice presets found (voice cloning unavailable)\n");
+            }
         }
     }
 

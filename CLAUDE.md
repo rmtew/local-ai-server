@@ -77,7 +77,7 @@ bin/local-ai-server.exe \
   --port=8090 --threads=4 --verbose
 ```
 
-- `--tts-model`: Supports both 0.6B and 1.7B models. Model size auto-detected. Both need the shared vocoder at `<tts-model>/../Qwen3-TTS-Tokenizer-12Hz/`.
+- `--tts-model`: Supports both 0.6B and 1.7B models, and both Base and CustomVoice variants. Model size auto-detected. Both need the shared vocoder at `<tts-model>/../Qwen3-TTS-Tokenizer-12Hz/`. CustomVoice models have built-in named voices via `spk_id` entries in the model's config.json (auto-detected at init, no `voice_presets.bin` needed).
 - **TTS FP16** (on by default for GPU builds): TTS talker weights stored as FP16, halving VRAM with no quality or speed penalty. VRAM savings: 0.6B 2136→1278 MB, 1.7B 5852→3136 MB. Code predictor stays F32 for audio quality. Disable with `--no-fp16`.
 - **ASR FP16** (on by default for GPU builds): ASR decoder weights stored as FP16, saving ~1.5 GB VRAM (0.6B: 3655→2207 MB). Encoder weights stay F32. Full GPU decoder stays enabled via fused FP16 matvec kernel (negligible speed impact). Disable with `--no-fp16-asr`.
 - `--tts-max-steps=N`: Max decode steps (default 200, ~16s audio). Each step = 80ms audio.
@@ -130,6 +130,8 @@ The `qwen-asr` submodule has its own regression suite (`asr_regression.py`).
 ### TTS Pipeline (`tts_pipeline.c`)
 
 Text → tokenize → talker LM (GPU, `tts_native.c`) → code predictor (GPU) → codec tokens → vocoder (CPU, `tts_vocoder.c`) → WAV
+
+Voice presets: CustomVoice models have `spk_id` entries in their config.json mapping voice names to codec embedding token indices. At init, `tts_pipeline.c` reads these and builds voice presets by extracting the corresponding BF16 codec embedding rows. Base models fall back to `voice_presets.bin` files.
 
 Key TTS source files:
 - `tts_native.c` — Native C+cuBLAS talker LM and code predictor (~1900 lines)
