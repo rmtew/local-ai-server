@@ -93,7 +93,7 @@ static void send_audio_sse(SOCKET client, const TtsResult *result) {
 
 /* ---- Main handler ---- */
 
-void handle_tts_speech(SOCKET client, const HttpRequest *request,
+void handle_tts_speech(SOCKET client, HttpRequest *request,
                        struct HandlerContext *ctx) {
     if (!ctx->tts) {
         http_send_json_error(client, 501,
@@ -123,7 +123,6 @@ void handle_tts_speech(SOCKET client, const HttpRequest *request,
     char voice[64] = {0};
     char response_format[32] = {0};
     char language[32] = {0};
-    double speed = 1.0;
     double seed = -1.0;
     double temperature = 0.9;
     double top_k_d = 50.0;
@@ -137,8 +136,6 @@ void handle_tts_speech(SOCKET client, const HttpRequest *request,
                    "response_format", response_format, sizeof(response_format));
     jr_get_string((const char *)request->body, request->body_len,
                    "language", language, sizeof(language));
-    jr_get_double((const char *)request->body, request->body_len,
-                   "speed", &speed);
     jr_get_double((const char *)request->body, request->body_len,
                    "seed", &seed);
     jr_get_double((const char *)request->body, request->body_len,
@@ -196,8 +193,8 @@ void handle_tts_speech(SOCKET client, const HttpRequest *request,
         }
     }
     if (ctx->verbose) {
-        printf("  params: temp=%.2f, top_k=%d, speed=%.1f, seed=%d, stream=%d\n",
-               temperature, top_k, speed,
+        printf("  params: temp=%.2f, top_k=%d, seed=%d, stream=%d\n",
+               temperature, top_k,
                seed >= 0.0 ? (int)seed : -1, stream);
     }
 
@@ -206,15 +203,17 @@ void handle_tts_speech(SOCKET client, const HttpRequest *request,
      * never emit EOS (running to max_steps = 16s of audio).
      * When an explicit seed is requested, also force single-threaded GEMM
      * for deterministic output. */
+    unsigned int used_seed;
     int saved_threads = 0;
     if (seed >= 0.0) {
-        srand((unsigned int)seed);
+        used_seed = (unsigned int)seed;
+        srand(used_seed);
         saved_threads = ctx->threads;
         qwen_set_threads(1);
     } else {
         /* Time-based seed: mix high-resolution timer bits for good entropy */
-        unsigned int t = (unsigned int)(platform_time_ms() * 1000.0);
-        srand(t);
+        used_seed = (unsigned int)(platform_time_ms() * 1000.0);
+        srand(used_seed);
     }
 
     /* Set up streaming if requested */
@@ -235,7 +234,6 @@ void handle_tts_speech(SOCKET client, const HttpRequest *request,
     const char *lang = language[0] ? language : NULL;
     int rc = tts_pipeline_synthesize(ctx->tts, input_text, v, lang,
                                       (float)temperature, top_k,
-                                      (float)speed,
                                       progress_fn, progress_data,
                                       &result);
     double t_synth_end = platform_time_ms();
@@ -333,6 +331,7 @@ void handle_tts_speech(SOCKET client, const HttpRequest *request,
         jw_field_int(&w, "n_samples", result.n_samples);
         jw_field_double(&w, "elapsed_ms", result.elapsed_ms, 1);
         jw_field_double(&w, "asr_ms", t_asr_end - t_asr_start, 1);
+        jw_field_int(&w, "seed", (int64_t)used_seed);
 
         if (ts && ts_count > 0 && asr_text) {
             jw_field_array_start(&w, "words");

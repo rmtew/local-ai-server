@@ -13,9 +13,9 @@
 struct HandlerContext;
 
 /* Handle POST /v1/audio/speech.
- * Expects JSON body: {"input":"text","voice":"default","speed":1.0,"response_format":"wav"}
+ * Expects JSON body: {"input":"text","voice":"default","response_format":"wav"}
  * Returns audio/wav binary response. */
-void handle_tts_speech(SOCKET client, const HttpRequest *request,
+void handle_tts_speech(SOCKET client, HttpRequest *request,
                        struct HandlerContext *ctx);
 
 #endif /* LOCAL_AI_HANDLER_TTS_H */

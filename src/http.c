@@ -251,7 +251,8 @@ void http_server_run(HttpServer *srv, http_handler_fn handler, void *user_data) 
 
         /* Cleanup */
         free(req.body);
-        closesocket(client);
+        if (!req.detached)
+            closesocket(client);
     }
 }
 

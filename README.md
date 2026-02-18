@@ -131,8 +131,7 @@ Synthesize speech. JSON body, returns WAV audio.
 ```json
 {
   "input": "Hello, world!",
-  "voice": "Chelsie",
-  "speed": 1.0
+  "voice": "Chelsie"
 }
 ```
 
@@ -141,7 +140,6 @@ Synthesize speech. JSON body, returns WAV audio.
 - `language` -- Language hint: `"auto"` (default), `"english"`, `"chinese"`, `"german"`, `"spanish"`, `"japanese"`, `"french"`, `"korean"`, `"russian"`, `"italian"`, `"portuguese"`
 - `temperature` -- Sampling temperature (default 0.9)
 - `top_k` -- Top-k sampling (default 50)
-- `speed` -- Playback speed multiplier (0.25 to 4.0, default 1.0)
 - `seed` -- Integer seed for deterministic output (forces single-threaded inference; omit for default behavior)
 - `response_format` -- `"wav"` (default)
 

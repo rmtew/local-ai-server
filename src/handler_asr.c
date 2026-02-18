@@ -12,6 +12,9 @@
 #include "multipart.h"
 #include "json.h"
 
+#include "json_reader.h"
+#include "platform.h"
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -97,7 +100,7 @@ static void sse_token_callback(const char *piece, void *userdata) {
 
 /* ---- Route: POST /v1/audio/transcriptions ---- */
 
-static void handle_transcription(SOCKET client, const HttpRequest *request,
+static void handle_transcription(SOCKET client, HttpRequest *request,
                                  HandlerContext *ctx) {
     /* Check ASR is loaded */
     if (!ctx->asr_ctx) {
@@ -455,9 +458,247 @@ static void handle_transcription(SOCKET client, const HttpRequest *request,
     free(text);
 }
 
+/* ---- Live streaming ASR ---- */
+
+/* Token callback for live SSE: sends each fixed token to the SSE socket. */
+static void sse_live_token_cb(const char *piece, void *userdata) {
+    HandlerContext *ctx = (HandlerContext *)userdata;
+    if (ctx->live_session.sse_error) return;
+
+    char buf[1024];
+    JsonWriter w;
+    jw_init(&w, buf, sizeof(buf));
+    jw_object_start(&w);
+    jw_field_string(&w, "token", piece);
+    jw_object_end(&w);
+
+    SOCKET sock = ctx->live_session.sse_socket;
+    int n = send(sock, "data: ", 6, 0);
+    if (n <= 0) { ctx->live_session.sse_error = 1; return; }
+    n = send(sock, buf, (int)jw_length(&w), 0);
+    if (n <= 0) { ctx->live_session.sse_error = 1; return; }
+    n = send(sock, "\n\n", 2, 0);
+    if (n <= 0) { ctx->live_session.sse_error = 1; return; }
+}
+
+/* Inference thread: runs qwen_transcribe_stream_live, sends done event, cleans up. */
+#ifdef _WIN32
+static DWORD WINAPI live_inference_thread(LPVOID arg) {
+#else
+static void *live_inference_thread(void *arg) {
+#endif
+    HandlerContext *ctx = (HandlerContext *)arg;
+    SOCKET sock = ctx->live_session.sse_socket;
+
+    qwen_set_token_callback(ctx->asr_ctx, sse_live_token_cb, ctx);
+
+    double t0 = platform_time_ms();
+    char *text = qwen_transcribe_stream_live(ctx->asr_ctx, ctx->live_session.live);
+    double elapsed = platform_time_ms() - t0;
+
+    qwen_set_token_callback(ctx->asr_ctx, NULL, NULL);
+
+    /* Send done event */
+    if (!ctx->live_session.sse_error) {
+        size_t text_len = text ? strlen(text) : 0;
+        size_t buf_size = text_len * 2 + 512;
+        char *json_buf = (char *)malloc(buf_size);
+        if (json_buf) {
+            JsonWriter w;
+            jw_init(&w, json_buf, buf_size);
+            jw_object_start(&w);
+            jw_field_bool(&w, "done", 1);
+            jw_field_string(&w, "text", text ? text : "");
+            jw_field_double(&w, "duration",
+                            ctx->asr_ctx->perf_audio_ms / 1000.0, 3);
+            jw_field_int(&w, "perf_total_ms", (int64_t)elapsed);
+            jw_field_int(&w, "perf_encode_ms",
+                         (int64_t)ctx->asr_ctx->perf_encode_ms);
+            jw_field_int(&w, "perf_decode_ms",
+                         (int64_t)ctx->asr_ctx->perf_decode_ms);
+            jw_object_end(&w);
+            http_send_sse_event(sock, json_buf, jw_length(&w));
+            free(json_buf);
+        }
+    }
+
+    if (text) {
+        printf("[ASR live] \"%.60s%s\" — %.0fms\n",
+               text, strlen(text) > 60 ? "..." : "", elapsed);
+    }
+
+    free(text);
+    closesocket(sock);
+
+    /* Restore ASR context to defaults so regular transcriptions aren't affected. */
+    ctx->asr_ctx->past_text_conditioning = 0;
+    qwen_set_force_language(ctx->asr_ctx, NULL);
+
+    /* Free the live audio buffer (no reader thread to join — thread handle is 0) */
+    qwen_live_audio_free(ctx->live_session.live);
+    ctx->live_session.live = NULL;
+    ctx->live_session.sse_socket = INVALID_SOCKET;
+    ctx->live_session.active = 0;
+
+    printf("[ASR live] Session ended\n");
+
+#ifdef _WIN32
+    return 0;
+#else
+    return NULL;
+#endif
+}
+
+static void handle_live_start(SOCKET client, HttpRequest *request,
+                              HandlerContext *ctx) {
+    if (!ctx->asr_ctx) {
+        http_send_json_error(client, 501,
+            "ASR not loaded (start server with --model=<dir>)",
+            "not_implemented");
+        return;
+    }
+    if (ctx->live_session.active) {
+        http_send_json_error(client, 409,
+            "Live session already active", "conflict");
+        return;
+    }
+
+    /* Parse optional language from JSON body */
+    char language[64] = {0};
+    if (request->body && request->body_len > 0) {
+        jr_get_string((const char *)request->body, request->body_len,
+                      "language", language, sizeof(language));
+    }
+
+    if (language[0]) {
+        if (qwen_set_force_language(ctx->asr_ctx, language) != 0) {
+            http_send_json_error(client, 400,
+                "Unsupported language", "invalid_request_error");
+            return;
+        }
+        printf("[ASR live] Starting session (lang=%s)\n", language);
+    } else {
+        printf("[ASR live] Starting session\n");
+    }
+
+    /* Enable past-text conditioning for streaming (required for prefix rollback,
+     * which lets the decoder carry context across chunks. Without this, each chunk
+     * re-generates text from scratch and hits max_new_tokens on long audio.) */
+    ctx->asr_ctx->past_text_conditioning = 1;
+
+    /* Allocate live audio buffer (no reader thread — audio comes via HTTP) */
+    qwen_live_audio_t *live = (qwen_live_audio_t *)calloc(1, sizeof(qwen_live_audio_t));
+    if (!live) {
+        http_send_json_error(client, 500, "Out of memory", "server_error");
+        return;
+    }
+#ifdef _WIN32
+    InitializeCriticalSection(&live->mutex);
+    InitializeConditionVariable(&live->cond);
+#else
+    pthread_mutex_init(&live->mutex, NULL);
+    pthread_cond_init(&live->cond, NULL);
+#endif
+
+    /* Send SSE headers on this socket */
+    http_send_sse_headers(client);
+
+    /* Detach socket from accept loop — inference thread owns it now */
+    request->detached = 1;
+
+    /* Set up live session state */
+    ctx->live_session.live = live;
+    ctx->live_session.sse_socket = client;
+    ctx->live_session.sse_error = 0;
+
+    /* Spawn inference thread */
+#ifdef _WIN32
+    ctx->live_session.thread = CreateThread(NULL, 0, live_inference_thread, ctx, 0, NULL);
+    if (!ctx->live_session.thread) {
+        fprintf(stderr, "[ASR live] Failed to create inference thread\n");
+        closesocket(client);
+        request->detached = 0;
+        qwen_live_audio_free(live);
+        ctx->live_session.live = NULL;
+        ctx->asr_ctx->past_text_conditioning = 0;
+        qwen_set_force_language(ctx->asr_ctx, NULL);
+        return;
+    }
+#else
+    if (pthread_create(&ctx->live_session.thread, NULL, live_inference_thread, ctx) != 0) {
+        fprintf(stderr, "[ASR live] Failed to create inference thread\n");
+        closesocket(client);
+        request->detached = 0;
+        qwen_live_audio_free(live);
+        ctx->live_session.live = NULL;
+        ctx->asr_ctx->past_text_conditioning = 0;
+        qwen_set_force_language(ctx->asr_ctx, NULL);
+        return;
+    }
+    pthread_detach(ctx->live_session.thread);
+#endif
+
+    ctx->live_session.active = 1;
+}
+
+static void handle_live_audio(SOCKET client, HttpRequest *request,
+                              HandlerContext *ctx) {
+    if (!ctx->live_session.active) {
+        http_send_json_error(client, 409,
+            "No active live session", "conflict");
+        return;
+    }
+    if (!request->body || request->body_len == 0) {
+        http_send_json_error(client, 400,
+            "Empty audio body", "invalid_request_error");
+        return;
+    }
+
+    live_audio_convert_and_append(ctx->live_session.live,
+                                  request->body, request->body_len);
+
+    {
+        int n_frames = (int)(request->body_len / 2);
+        printf("[ASR live] Received %zu bytes (%d samples, %.1fs)\n",
+               request->body_len, n_frames, n_frames / 16000.0f);
+    }
+
+    const char *ok = "{\"ok\":true}";
+    http_send_response(client, 200, "application/json", ok, strlen(ok));
+}
+
+static void handle_live_stop(SOCKET client, HttpRequest *request,
+                             HandlerContext *ctx) {
+    (void)request;
+    if (!ctx->live_session.active) {
+        http_send_json_error(client, 409,
+            "No active live session", "conflict");
+        return;
+    }
+
+    /* Signal EOF to the live audio buffer */
+    qwen_live_audio_t *live = ctx->live_session.live;
+#ifdef _WIN32
+    EnterCriticalSection(&live->mutex);
+    live->eof = 1;
+    WakeConditionVariable(&live->cond);
+    LeaveCriticalSection(&live->mutex);
+#else
+    pthread_mutex_lock(&live->mutex);
+    live->eof = 1;
+    pthread_cond_signal(&live->cond);
+    pthread_mutex_unlock(&live->mutex);
+#endif
+
+    printf("[ASR live] Stop signaled\n");
+
+    const char *ok = "{\"ok\":true}";
+    http_send_response(client, 200, "application/json", ok, strlen(ok));
+}
+
 /* ---- Main request router ---- */
 
-void asr_handle_request(SOCKET client, const HttpRequest *request, void *user_data) {
+void asr_handle_request(SOCKET client, HttpRequest *request, void *user_data) {
     HandlerContext *ctx = (HandlerContext *)user_data;
 
     if (ctx->verbose) {
@@ -476,9 +717,31 @@ void asr_handle_request(SOCKET client, const HttpRequest *request, void *user_da
         return;
     }
 
+    /* POST /v1/audio/transcriptions/live/* — live streaming ASR */
+    if (strcmp(request->method, "POST") == 0 &&
+        strcmp(request->path, "/v1/audio/transcriptions/live/start") == 0) {
+        handle_live_start(client, request, ctx);
+        return;
+    }
+    if (strcmp(request->method, "POST") == 0 &&
+        strcmp(request->path, "/v1/audio/transcriptions/live/audio") == 0) {
+        handle_live_audio(client, request, ctx);
+        return;
+    }
+    if (strcmp(request->method, "POST") == 0 &&
+        strcmp(request->path, "/v1/audio/transcriptions/live/stop") == 0) {
+        handle_live_stop(client, request, ctx);
+        return;
+    }
+
     /* POST /v1/audio/transcriptions */
     if (strcmp(request->method, "POST") == 0 &&
         strcmp(request->path, "/v1/audio/transcriptions") == 0) {
+        if (ctx->live_session.active) {
+            http_send_json_error(client, 409,
+                "Live session active — stop it first", "conflict");
+            return;
+        }
         handle_transcription(client, request, ctx);
         return;
     }

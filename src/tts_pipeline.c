@@ -40,18 +40,13 @@ static void write_le32(unsigned char *p, uint32_t v) {
 }
 
 /* Encode float audio samples as 16-bit PCM WAV file.
- * speed adjusts playback rate: >1.0 = faster, <1.0 = slower.
  * Returns malloc'd WAV data, sets *out_len. */
 static unsigned char *encode_wav(const float *samples, int n_samples,
-                                 float speed, size_t *out_len) {
+                                 size_t *out_len) {
     size_t data_size = (size_t)n_samples * 2;  /* 16-bit = 2 bytes per sample */
     size_t wav_size = 44 + data_size;
     unsigned char *wav = (unsigned char *)malloc(wav_size);
     if (!wav) return NULL;
-
-    /* Adjust effective sample rate for speed control.
-     * Higher rate = player consumes samples faster = speech sounds faster. */
-    uint32_t effective_rate = (uint32_t)(WAV_SAMPLE_RATE * speed + 0.5f);
 
     /* RIFF header */
     memcpy(wav, "RIFF", 4);
@@ -63,8 +58,8 @@ static unsigned char *encode_wav(const float *samples, int n_samples,
     write_le32(wav + 16, 16);                    /* chunk size */
     write_le16(wav + 20, 1);                     /* PCM format */
     write_le16(wav + 22, 1);                     /* mono */
-    write_le32(wav + 24, effective_rate);         /* sample rate */
-    write_le32(wav + 28, effective_rate * 2);     /* byte rate */
+    write_le32(wav + 24, WAV_SAMPLE_RATE);         /* sample rate */
+    write_le32(wav + 28, WAV_SAMPLE_RATE * 2);    /* byte rate */
     write_le16(wav + 32, 2);                     /* block align */
     write_le16(wav + 34, 16);                    /* bits per sample */
 
@@ -344,14 +339,10 @@ void tts_pipeline_free(TtsPipeline *tts) {
 
 int tts_pipeline_synthesize(TtsPipeline *tts, const char *text,
                             const char *voice, const char *language,
-                            float temperature, int top_k, float speed,
+                            float temperature, int top_k,
                             tts_progress_fn progress, void *progress_data,
                             TtsResult *result) {
     memset(result, 0, sizeof(*result));
-
-    /* Clamp speed to reasonable range */
-    if (speed < 0.25f) speed = 0.25f;
-    if (speed > 4.0f) speed = 4.0f;
 
     double t_start = platform_time_ms();
 
@@ -418,7 +409,7 @@ int tts_pipeline_synthesize(TtsPipeline *tts, const char *text,
 
     /* 5. Encode as WAV */
     size_t wav_len = 0;
-    unsigned char *wav = encode_wav(audio, n_samples, speed, &wav_len);
+    unsigned char *wav = encode_wav(audio, n_samples, &wav_len);
     free(audio);
 
     if (!wav) {

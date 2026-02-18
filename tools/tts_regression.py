@@ -69,7 +69,6 @@ C_BWHITE = _sgr("1;37")
 class TestCase(NamedTuple):
     id: str
     text: str
-    speed: float
     min_duration_s: float
     max_duration_s: float
     purpose: str
@@ -79,7 +78,6 @@ TEST_CASES: List[TestCase] = [
     TestCase(
         id="short_hello",
         text="Hello, world.",
-        speed=1.0,
         min_duration_s=0.3,
         max_duration_s=5.0,
         purpose="Basic short phrase",
@@ -87,7 +85,6 @@ TEST_CASES: List[TestCase] = [
     TestCase(
         id="medium_fox",
         text="The quick brown fox jumps over the lazy dog near the riverbank.",
-        speed=1.0,
         min_duration_s=1.0,
         max_duration_s=15.0,
         purpose="Standard medium sentence",
@@ -95,18 +92,9 @@ TEST_CASES: List[TestCase] = [
     TestCase(
         id="long_mixed",
         text='On January 15th, 2024, Dr. Smith said: "The temperature was -3.5 degrees!" Can you believe it?',
-        speed=1.0,
         min_duration_s=2.0,
         max_duration_s=20.0,
         purpose="Numbers, punctuation, quotes",
-    ),
-    TestCase(
-        id="speed_fast",
-        text="The quick brown fox jumps over the lazy dog near the riverbank.",
-        speed=1.5,
-        min_duration_s=0.5,
-        max_duration_s=12.0,
-        purpose="Speed parameter regression",
     ),
 ]
 
@@ -219,14 +207,13 @@ def rms(samples: Sequence[float]) -> float:
 # ---- Server communication ----
 
 def tts_request(
-    server: str, text: str, speed: float, seed: int, timeout_s: int,
+    server: str, text: str, seed: int, timeout_s: int,
     temperature: float = 0.3,
 ) -> Optional[bytes]:
     """Send a TTS request and return WAV bytes, or None on error."""
     payload = json.dumps({
         "input": text,
         "voice": "alloy",
-        "speed": speed,
         "seed": seed,
         "temperature": temperature,
     }).encode("utf-8")
@@ -265,7 +252,7 @@ class StreamResult(NamedTuple):
 
 
 def tts_request_stream(
-    server: str, text: str, speed: float, seed: int, timeout_s: int,
+    server: str, text: str, seed: int, timeout_s: int,
     temperature: float = 0.3,
 ) -> Optional[StreamResult]:
     """Send a streaming TTS request, parse SSE events, return decoded WAV
@@ -283,7 +270,6 @@ def tts_request_stream(
     payload = json.dumps({
         "input": text,
         "voice": "alloy",
-        "speed": speed,
         "seed": seed,
         "stream": True,
         "temperature": temperature,
@@ -542,7 +528,7 @@ def generate_reference(
     print(f"{tag} {C_BWHITE}{tc.id}{C_RESET} ...", end="", flush=True)
 
     t0 = time.monotonic()
-    wav_data = tts_request(server, tc.text, tc.speed, SEED, timeout_s)
+    wav_data = tts_request(server, tc.text, SEED, timeout_s)
     elapsed = time.monotonic() - t0
 
     if wav_data is None:
@@ -607,7 +593,7 @@ def run_regression(
         print(f"{tag_start} {C_BWHITE}{tc.id}{C_RESET} ...", end="", flush=True)
 
         t0 = time.monotonic()
-        wav_data = tts_request(server, tc.text, tc.speed, SEED, timeout_s)
+        wav_data = tts_request(server, tc.text, SEED, timeout_s)
         elapsed = time.monotonic() - t0
 
         if wav_data is None:
@@ -780,7 +766,7 @@ def run_stream_regression(
         print(f"{tag_start} {C_BWHITE}{tc.id}{C_RESET} ...", end="", flush=True)
 
         t0 = time.monotonic()
-        sr = tts_request_stream(server, tc.text, tc.speed, SEED, timeout_s)
+        sr = tts_request_stream(server, tc.text, SEED, timeout_s)
         elapsed = time.monotonic() - t0
 
         if sr is None:

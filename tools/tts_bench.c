@@ -143,7 +143,6 @@ static int bench_case(TtsPipeline *tts, const bench_case_t *bc,
         int rc = tts_pipeline_synthesize(tts, bc->text,
                                           NULL, NULL,    /* voice, language */
                                           0.3f, 50,      /* temperature, top_k */
-                                          1.0f,          /* speed */
                                           NULL, NULL,    /* progress callback */
                                           &result);
 
@@ -299,7 +298,7 @@ int main(int argc, char **argv) {
             qwen_set_threads(1);
             TtsResult result;
             int rc = tts_pipeline_synthesize(&tts, BENCH_CASES[0].text,
-                                              NULL, NULL, 0.3f, 50, 1.0f,
+                                              NULL, NULL, 0.3f, 50,
                                               NULL, NULL, &result);
             qwen_set_threads(threads);
             if (rc == 0) {

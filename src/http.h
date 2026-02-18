@@ -32,6 +32,7 @@ typedef struct {
     size_t content_length;      /* Content-Length value */
     unsigned char *body;        /* Request body (malloc'd, caller frees) */
     size_t body_len;            /* Actual body length received */
+    int detached;               /* If set by handler, accept loop won't close socket */
 } HttpRequest;
 
 /* Server state */
@@ -43,8 +44,9 @@ typedef struct {
 
 /* Handler callback: called for each request.
  * Must send a response using http_send_response() or http_send_json_error().
- * request->body is freed by the caller after the handler returns. */
-typedef void (*http_handler_fn)(SOCKET client, const HttpRequest *request, void *user_data);
+ * request->body is freed by the caller after the handler returns.
+ * Handler may set request->detached=1 to keep the socket open after return. */
+typedef void (*http_handler_fn)(SOCKET client, HttpRequest *request, void *user_data);
 
 /* Initialize server (WSAStartup, bind, listen).
  * Returns 0 on success, -1 on error. */

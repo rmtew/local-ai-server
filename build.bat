@@ -16,6 +16,7 @@ set TARGET=server
 if /I "%~1"=="bench" set TARGET=bench
 if /I "%~1"=="ttsbench" set TARGET=ttsbench
 if /I "%~1"=="presets" set TARGET=presets
+if /I "%~1"=="asrcli" set TARGET=asrcli
 
 REM Auto-setup MSVC environment if not already configured
 where cl.exe >nul 2>&1
@@ -147,6 +148,7 @@ REM ---- Target: bench / ttsbench / presets ----
 if /I "%TARGET%"=="bench" goto :build_bench
 if /I "%TARGET%"=="ttsbench" goto :build_ttsbench
 if /I "%TARGET%"=="presets" goto :build_presets
+if /I "%TARGET%"=="asrcli" goto :build_asrcli
 
 REM ---- Target: server (default) ----
 
@@ -258,6 +260,29 @@ link /nologo /DEBUG /SUBSYSTEM:CONSOLE /OUT:"%BIN_DIR%\voice-presets.exe" %PRESE
 if %ERRORLEVEL% EQU 0 (
     echo.
     echo Build complete: %BIN_DIR%\voice-presets.exe
+) else (
+    echo.
+    echo Build failed.
+    exit /b 1
+)
+goto :eof
+
+REM ---- Target: asrcli ----
+:build_asrcli
+
+echo Compiling qwen-asr CLI...
+cl /nologo /W3 /O2 /arch:AVX2 /fp:fast /DNDEBUG !BLAS_CFLAGS! !CUDA_CFLAGS! /I"%QWEN_ASR_DIR%" /c "%QWEN_ASR_DIR%\main.c" /Fo:"%BUILD_DIR%\qwen_asr_main.obj"
+if %ERRORLEVEL% NEQ 0 (
+    echo ASR CLI compilation failed.
+    exit /b 1
+)
+
+echo Linking qwen-asr CLI...
+link /nologo /DEBUG /SUBSYSTEM:CONSOLE /OUT:"%BIN_DIR%\qwen-asr.exe" "%BUILD_DIR%\qwen_asr_main.obj" %QWEN_OBJS% !BLAS_LIBS! !CUDA_LIBS! ws2_32.lib advapi32.lib psapi.lib
+
+if %ERRORLEVEL% EQU 0 (
+    echo.
+    echo Build complete: %BIN_DIR%\qwen-asr.exe
 ) else (
     echo.
     echo Build failed.
