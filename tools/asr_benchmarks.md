@@ -243,3 +243,150 @@ FP16 overhead vs F32: **-1% / +3%** (within noise). The combination of vectorize
 
 **Trade-off summary:** 40% VRAM savings (3655→2207 MB) for negligible decode overhead. RTF 0.08-0.10x (10-12× real-time). The dequant+cublasSgemm path remains as fallback for M>1 (not used in the decoder path).
 
+---
+
+## 2026-02-18 — Qwen3-ASR-1.7B (FP16 decoder)
+
+**Config:** Qwen3-ASR-1.7B, 4 threads, RTX 3070 Laptop GPU, CUDA 13.1, `--fp16-asr`
+
+### VRAM
+
+| Model | Mode | VRAM |
+|-------|------|------|
+| 0.6B | FP16 | 2207 MB |
+| 1.7B | FP16 | 7779 MB |
+
+The 1.7B model with FP16 decoder nearly fills the 8192 MB RTX 3070 Laptop GPU (413 MB headroom). Not enough room to co-load TTS (0.6B TTS needs ~1278 MB).
+
+### Results (median of runs 2-5, run 1 warmup)
+
+| Sample | Audio | Total (ms) | Encode (ms) | Decode (ms) | RTF | Words |
+|--------|------:|-----------:|------------:|------------:|----:|------:|
+| test_speech.wav | 3.6s | 518 | 104 | 419 | 0.14x | 15 |
+| jfk.wav | 11.0s | 1131 | 260 | 872 | 0.10x | 26 |
+
+### Raw runs
+
+**test_speech.wav:**
+
+| Run | Total (ms) | Encode (ms) | Decode (ms) |
+|-----|----------:|------------:|------------:|
+| 1 (warmup) | 804 | 317 | 487 |
+| 2 | 526 | 104 | 422 |
+| 3 | 523 | 104 | 418 |
+| 4 | 513 | 94 | 419 |
+| 5 | 499 | 89 | 410 |
+
+**jfk.wav:**
+
+| Run | Total (ms) | Encode (ms) | Decode (ms) |
+|-----|----------:|------------:|------------:|
+| 1 (warmup) | 1750 | 594 | 1155 |
+| 2 | 1130 | 261 | 868 |
+| 3 | 1134 | 259 | 875 |
+| 4 | 1124 | 266 | 857 |
+| 5 | 1132 | 250 | 882 |
+
+### Comparison vs 0.6B FP16 (GPU Encoder era)
+
+| Sample | 0.6B Total | 1.7B Total | Slowdown | 0.6B Decode | 1.7B Decode | Slowdown |
+|--------|----------:|----------:|---------:|------------:|------------:|---------:|
+| test_speech.wav | 339ms | 518ms | 1.53x | 258ms | 419ms | 1.62x |
+| jfk.wav | 783ms | 1131ms | 1.44x | 552ms | 872ms | 1.58x |
+
+### Analysis
+
+- **RTF 0.10-0.14x** (7-10× real-time) — still very fast for interactive use
+- **1.5-1.6x slower decode** than 0.6B, consistent with the larger model (28 vs 24 decoder layers, wider hidden dim)
+- **Encode time similar** to 0.6B (~104ms for 3.6s, ~260ms for 11s) — encoder architecture scales less aggressively
+- **VRAM is the constraint**, not speed. At 7779 MB, the 1.7B can only run solo (no TTS co-loading on 8 GB GPU)
+- **Use case:** Swap in 1.7B when accuracy matters more than concurrent TTS — longer/noisier audio, multilingual content, or difficult proper nouns
+
+---
+
+## 2026-02-18 — Word Error Rate (LibriSpeech)
+
+**Setup:** WER evaluation using LibriSpeech test-clean and test-other (first 100 utterances each). Ground-truth human transcripts compared against model output. Standard WER normalization (uppercase, strip punctuation, word-level Levenshtein).
+
+**Tool:** `tools/wer_bench.py` — transcribes FLAC files via HTTP API, computes WER with S/I/D breakdown.
+
+**Dataset:** LibriSpeech (https://www.openslr.org/12/), stored at `DEPS_ROOT/datasets/librispeech/`.
+
+### Results (100 utterances per split)
+
+| Model | test-clean | | test-other | |
+|-------|----:|----:|----:|----:|
+| | WER | Errors | WER | Errors |
+| 0.6B FP16 | **1.15%** | 27 (22S/2I/3D) / 2357 | **2.67%** | 43 (38S/3I/2D) / 1611 |
+| 1.7B FP16 | **1.15%** | 27 (22S/2I/3D) / 2357 | **2.67%** | 43 (38S/3I/2D) / 1611 |
+
+### Analysis
+
+The 1.7B model produces **identical WER** to 0.6B on LibriSpeech — same error count, same S/I/D breakdown. Both models are saturated on this dataset (clean read English audiobooks).
+
+The 1.7B's advantages (multilingual, noisy environments, rare vocabulary) likely show on harder benchmarks — accented speech, real-world recordings, non-English languages. LibriSpeech is too clean to differentiate.
+
+### Context
+
+Published WER benchmarks for reference (full test sets):
+
+| Model | test-clean | test-other |
+|-------|--------:|--------:|
+| Whisper Large-v3 | 2.0% | 3.6% |
+| Qwen3-ASR 0.6B/1.7B (ours, 100 utts) | 1.15% | 2.67% |
+
+Note: Our numbers are on 100 utterances (not full 2620/2939), so they'll shift with more data.
+
+---
+
+## 2026-02-18 — INT8 Decoder Weights
+
+**Change:** ASR decoder weights stored as INT8 (1 byte/param) with per-row absmax quantization. Scale factor per row: `scale = max(abs(row)) / 127`, `int8[j] = round(row[j] / scale)`. Quantized on-the-fly from BF16 safetensors at load time (no model file changes).
+
+**Config:** `--int8-asr` flag or `asr_int8` config key.
+
+### Implementation
+
+- **Fused INT8 matvec kernel** (`qwen_int8_matvec_f32`) for M=1 decode: 128-bit `uint4` loads = 16 INT8 values per load (vs 8 FP16), per-row scale applied after reduction. Bandwidth: 1 byte/weight element (half of FP16's 2 bytes).
+- **INT8→F32 dequant + cublasSgemm** fallback for M>1 prefill.
+- **lm_head stays FP16** (not INT8) — argmax accuracy requires higher precision for the final vocabulary projection.
+
+### VRAM Impact
+
+| Model | F32 | FP16 | INT8 | INT8 Savings vs FP16 |
+|-------|----:|-----:|-----:|---------------------:|
+| 0.6B | 3655 MB | 2207 MB | — | — |
+| 1.7B | — | 7779 MB | 3822 MB | **-3957 MB (-51%)** |
+
+1.7B INT8 + TTS 0.6B FP16: 3822 + 1278 = **5100 MB** — fits on 8 GB GPU with 3 GB headroom.
+
+### WER (LibriSpeech, 100 utterances)
+
+| Model | Mode | test-clean | test-other |
+|-------|------|--------:|--------:|
+| 0.6B | FP16 | 1.15% | 2.67% |
+| 0.6B | INT8 | 1.53% | 3.04% |
+| 1.7B | FP16 | 1.15% | 2.67% |
+| 1.7B | INT8 | **1.15%** | **2.79%** |
+
+1.7B INT8 has no meaningful WER degradation (identical test-clean, +0.12% test-other). 0.6B INT8 shows slightly higher WER (+0.38% test-clean, +0.37% test-other) — the smaller model is more sensitive to weight quantization, though still well within acceptable range.
+
+### Bug Fix: d_ffn_out Buffer Overflow
+
+During INT8 testing, discovered a pre-existing buffer overflow in the GPU decoder: `d_ffn_out` was allocated as `[hidden]` (2048 for 1.7B) but receives `[intermediate]` (6144) elements from SwiGLU. The overflow (4096 extra floats = 16 KB) corrupted adjacent GPU memory (RMSNorm weights), causing garbage output for 1.7B INT8. Fixed by allocating `d_ffn_out` as `[intermediate]`. This bug was latent in all previous GPU decoder builds — it happened to not corrupt critical memory with FP16/F32 weight layouts, or the overflow landed in padding/unused regions.
+
+---
+
+## Future Optimizations (Backlog)
+
+### FP16 Encoder Weights (1.7B: ~600 MB VRAM savings)
+
+The encoder weights are currently F32 on GPU. For 0.6B this is only 0.694 GiB (negligible), but for 1.7B it's **1.183 GiB**. Storing encoder weights as FP16 and dequanting before GEMM would save ~600 MB, bringing 1.7B from 7779 MB to ~7180 MB.
+
+**Approach:** Use the proven dequant+cublasSgemm path (store FP16 on GPU, dequant to F32 scratch buffer before each GEMM). The fused FP16 matvec kernel won't help here — encoder GEMMs are batched (M>1), not M=1 matvecs.
+
+**Caveats:**
+- Dequant+cublasSgemm has ~2x bandwidth overhead vs plain F32 cublasSgemm (read 2B FP16 + write 4B F32 scratch + read 4B F32 = 10 bytes/element vs 4 bytes/element)
+- Encoder is currently fast (104-260ms), so even 2x slowdown only adds 100-260ms — acceptable for interactive use
+- Do NOT attempt FP16×FP16 cublasGemmEx — mixed-type inputs silently produce zeros, and same-type FP16×FP16 accumulates precision errors through stacked layers (documented in "FP16 Decoder Weights" section above)
+

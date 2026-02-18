@@ -17,6 +17,7 @@ typedef struct {
     int  threads;           /* CPU threads (0 = use default) */
     int  tts_fp16;          /* -1 = not set, 0 = off, 1 = on (default: on for GPU builds) */
     int  asr_fp16;          /* -1 = not set, 0 = off, 1 = on (default: on for GPU builds) */
+    int  asr_int8;          /* -1 = not set, 0 = off, 1 = on */
     int  verbose;           /* -1 = not set, 0 = off, 1 = on */
     int  tts_max_steps;     /* 0 = use default */
     char language[64];      /* ASR language override */
