@@ -215,7 +215,7 @@ static int load_spk_id_presets(TtsPipeline *tts, const char *model_dir) {
 
 /* ---- Pipeline initialization ---- */
 
-int tts_pipeline_init(TtsPipeline *tts, const char *model_dir, int fp16, int verbose) {
+int tts_pipeline_init(TtsPipeline *tts, const char *model_dir, int fp16, int int8, int verbose) {
     memset(tts, 0, sizeof(*tts));
     tts->verbose = verbose;
 
@@ -250,7 +250,7 @@ int tts_pipeline_init(TtsPipeline *tts, const char *model_dir, int fp16, int ver
         }
         gpu = g_gpu_ctx;
 #endif
-        if (tts_native_init(tts->native, model_dir, gpu, fp16, verbose) != 0) {
+        if (tts_native_init(tts->native, model_dir, gpu, fp16, int8, verbose) != 0) {
             fprintf(stderr, "TTS: native init failed (need model.safetensors in %s)\n", model_dir);
             free(tts->native);
             tts->native = NULL;

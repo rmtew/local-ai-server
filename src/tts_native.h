@@ -188,9 +188,10 @@ typedef void (*tts_progress_fn)(const char *phase, int step, int max_steps,
  * and tokenizer files (vocab.json, merges.txt).
  * gpu_ctx may be NULL (CPU-only) or a qwen_gpu_ctx_t* for GPU acceleration.
  * fp16: if non-zero, store GPU weights as FP16 (half VRAM, uses tensor cores).
+ * int8: if non-zero, store talker weights as INT8 (quarter VRAM vs F32).
  * Returns 0 on success. */
 int tts_native_init(tts_native_ctx_t *ctx, const char *model_dir,
-                    void *gpu_ctx, int fp16, int verbose);
+                    void *gpu_ctx, int fp16, int int8, int verbose);
 
 /* Free all resources. */
 void tts_native_free(tts_native_ctx_t *ctx);

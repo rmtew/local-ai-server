@@ -59,6 +59,8 @@ static int try_load(app_config_t *cfg, const char *path) {
         cfg->asr_fp16 = bval;
     if (jr_get_bool(json, len, "asr_int8", &bval) == 0)
         cfg->asr_int8 = bval;
+    if (jr_get_bool(json, len, "tts_int8", &bval) == 0)
+        cfg->tts_int8 = bval;
     /* Legacy: "fp16" sets both if the new keys aren't present */
     if (jr_get_bool(json, len, "fp16", &bval) == 0) {
         if (cfg->tts_fp16 == -1) cfg->tts_fp16 = bval;
@@ -79,6 +81,7 @@ int config_load(app_config_t *cfg, const char *exe_path) {
     cfg->tts_fp16 = -1;
     cfg->asr_fp16 = -1;
     cfg->asr_int8 = -1;
+    cfg->tts_int8 = -1;
     cfg->verbose = -1;
 
     /* Try 1: cwd/config.json */

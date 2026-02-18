@@ -1182,7 +1182,7 @@ static int64_t *run_decode_loop(tts_native_ctx_t *ctx,
  * ======================================================================== */
 
 #ifdef USE_CUBLAS
-static int upload_gpu_weights(tts_native_ctx_t *ctx, int fp16) {
+static int upload_gpu_weights(tts_native_ctx_t *ctx, int fp16, int int8) {
     qwen_gpu_ctx_t *gpu = (qwen_gpu_ctx_t *)ctx->gpu_ctx;
     if (!gpu) return 0;
 
@@ -1196,10 +1196,13 @@ static int upload_gpu_weights(tts_native_ctx_t *ctx, int fp16) {
     int dim_cp = ctx->cp_config.dec_hidden;
     int inter_cp = ctx->cp_config.dec_intermediate;
 
-    /* FP16 mode applies to talker + text projection only.
+    /* INT8 or FP16 mode applies to talker + text projection only.
      * Code predictor stays F32 — its sub-codebook predictions are
      * quality-sensitive and it's only ~20% of total weight VRAM. */
-    if (fp16) {
+    if (int8) {
+        if (ctx->verbose) printf("TTS native: INT8 mode — talker weights as INT8, codec_head as FP16, code predictor as F32\n");
+        qwen_gpu_set_int8_mode(gpu, 1);
+    } else if (fp16) {
         if (ctx->verbose) printf("TTS native: FP16 mode — talker weights as FP16, code predictor as F32\n");
         qwen_gpu_set_fp16_mode(gpu, 1);
     }
@@ -1216,16 +1219,20 @@ static int upload_gpu_weights(tts_native_ctx_t *ctx, int fp16) {
         qwen_gpu_upload_weight_bf16(gpu, l->down_weight_bf16, dim_t, inter_t);
     }
 
-    /* Codec head */
+    /* Codec head — FP16 even in INT8 mode (sampling accuracy, same as ASR lm_head) */
+    if (int8) { qwen_gpu_set_int8_mode(gpu, 0); qwen_gpu_set_fp16_mode(gpu, 1); }
     qwen_gpu_upload_weight_bf16(gpu, ctx->codec_head_bf16, TTS_TALKER_VOCAB, dim_t);
+    if (int8) { qwen_gpu_set_fp16_mode(gpu, 0); qwen_gpu_set_int8_mode(gpu, 1); }
 
     /* Text projection */
     tts_text_project_t *tp = &ctx->text_project;
     qwen_gpu_upload_weight_bf16(gpu, tp->fc1_weight_bf16, tp->intermediate, TTS_TEXT_HIDDEN_SIZE);
     qwen_gpu_upload_weight_bf16(gpu, tp->fc2_weight_bf16, dim_t, tp->intermediate);
 
-    /* Turn off FP16 before code predictor upload */
-    if (fp16) {
+    /* Turn off INT8/FP16 before code predictor upload */
+    if (int8) {
+        qwen_gpu_set_int8_mode(gpu, 0);
+    } else if (fp16) {
         qwen_gpu_set_fp16_mode(gpu, 0);
     }
 
@@ -1261,7 +1268,7 @@ static int upload_gpu_weights(tts_native_ctx_t *ctx, int fp16) {
  * ======================================================================== */
 
 int tts_native_init(tts_native_ctx_t *ctx, const char *model_dir,
-                    void *gpu_ctx, int fp16, int verbose) {
+                    void *gpu_ctx, int fp16, int int8, int verbose) {
     memset(ctx, 0, sizeof(*ctx));
     ctx->verbose = verbose;
     ctx->max_steps = TTS_MAX_DECODE_STEPS;
@@ -1271,6 +1278,7 @@ int tts_native_init(tts_native_ctx_t *ctx, const char *model_dir,
 #else
     (void)gpu_ctx;
     (void)fp16;
+    (void)int8;
 #endif
 
     double t_start = platform_time_ms();
@@ -1375,7 +1383,7 @@ int tts_native_init(tts_native_ctx_t *ctx, const char *model_dir,
             if (verbose) printf("TTS native: TTS_CPU_ONLY=1, skipping GPU upload\n");
             ctx->gpu_ctx = NULL;
         } else {
-            upload_gpu_weights(ctx, fp16);
+            upload_gpu_weights(ctx, fp16, int8);
         }
     }
 #endif

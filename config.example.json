@@ -5,5 +5,6 @@
     "threads": 4,
     "tts_fp16": true,
     "asr_int8": true,
+    "tts_int8": false,
     "verbose": false
 }

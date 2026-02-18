@@ -390,17 +390,9 @@ The encoder weights are currently F32 on GPU. For 0.6B this is only 0.694 GiB (n
 - Encoder is currently fast (104-260ms), so even 2x slowdown only adds 100-260ms — acceptable for interactive use
 - Do NOT attempt FP16×FP16 cublasGemmEx — mixed-type inputs silently produce zeros, and same-type FP16×FP16 accumulates precision errors through stacked layers (documented in "FP16 Decoder Weights" section above)
 
-### INT8 TTS Weight Quantization
+### INT8 TTS Weight Quantization — DONE (2026-02-19)
 
-Apply the same per-row absmax INT8 quantization to TTS talker LM weights. Estimated VRAM savings: 0.6B 1278→~700 MB, 1.7B 3136→~1600 MB. Primary value is enabling 1.7B ASR INT8 (3822 MB) + 1.7B TTS INT8 (~1600 MB) ≈ 5400 MB on 8 GB GPU.
-
-**Approach:** Port INT8 upload/dispatch from `qwen_asr_gpu.c` to `tts_native.c`. Same pattern: per-row absmax quantization at load time, fused INT8 matvec kernel for decode (M=1), dequant+cublasSgemm for prefill (M>1). Code predictor should stay F32 (already excluded from FP16 for audio quality).
-
-**Quality verification:** Use `tools/tts_regression.py` (Pearson correlation + SNR vs seeded reference WAVs). No clean single-number metric like WER — quality is perceptual.
-
-**Caveats:**
-- TTS uses its own GPU infrastructure (`tts_native.c`), separate from qwen-asr — INT8 kernels exist in the CUBIN but the upload/dispatch logic needs porting
-- 0.6B savings are marginal (~578 MB) when VRAM is already comfortable; 1.7B is the main beneficiary
+Implemented in `tts_native.c`. Results in `tools/tts_benchmarks.md` under "2026-02-19 — INT8 Talker Weights". 0.6B: 1278→853 MB (-33% vs FP16, -60% vs F32). Sanity regression passes, perceptual quality equivalent to FP16.
 
 ### Language Switching on Short Utterances (Known Issue)
 

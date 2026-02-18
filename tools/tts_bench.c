@@ -197,6 +197,7 @@ static void print_usage(const char *prog) {
     printf("Options:\n");
     printf("  --model <dir>    TTS model directory (default: from config.json)\n");
     printf("  --fp16           Use FP16 GPU weights (default: from config.json)\n");
+    printf("  --int8           Use INT8 GPU weights for talker (default: from config.json)\n");
     printf("  --runs <N>       Benchmark iterations per case (default: 3)\n");
     printf("  --warmup <N>     Warmup iterations (default: 1)\n");
     printf("  --threads <N>    CPU threads for vocoder (default: 4)\n");
@@ -226,8 +227,10 @@ int main(int argc, char **argv) {
     /* TTS defaults to FP16 on GPU builds; config tts_fp16 overrides, legacy fp16 as fallback */
 #ifdef USE_CUBLAS
     int fp16 = cfg.tts_fp16 == 0 ? 0 : 1;
+    int int8 = cfg.tts_int8 == 1 ? 1 : 0;
 #else
     int fp16 = 0;
+    int int8 = 0;
 #endif
     int runs = 3;
     int warmup = 1;
@@ -242,6 +245,8 @@ int main(int argc, char **argv) {
             fp16 = 1;
         } else if (strcmp(argv[i], "--no-fp16") == 0) {
             fp16 = 0;
+        } else if (strcmp(argv[i], "--int8") == 0) {
+            int8 = 1;
         } else if ((val = parse_arg(argv[i], "--runs")) != NULL) {
             runs = atoi(val);
             if (runs < 1) runs = 1;
@@ -271,8 +276,9 @@ int main(int argc, char **argv) {
 
     /* Initialize */
     printf("=== TTS Pipeline Benchmark ===\n");
+    if (int8) fp16 = 0;  /* INT8 takes priority */
     printf("Model:   %s\n", model_dir);
-    printf("FP16:    %s\n", fp16 ? "yes" : "no");
+    printf("Quant:   %s\n", int8 ? "INT8" : fp16 ? "FP16" : "F32");
     printf("Threads: %d\n", threads);
     printf("Runs:    %d (+ %d warmup)\n", runs, warmup);
     printf("Seed:    %d\n\n", seed);
@@ -283,7 +289,7 @@ int main(int argc, char **argv) {
     double t_load = platform_time_ms();
 
     TtsPipeline tts;
-    if (tts_pipeline_init(&tts, model_dir, fp16, 0) != 0) {
+    if (tts_pipeline_init(&tts, model_dir, fp16, int8, 0) != 0) {
         fprintf(stderr, "Error: failed to initialize TTS pipeline from %s\n", model_dir);
         return 1;
     }

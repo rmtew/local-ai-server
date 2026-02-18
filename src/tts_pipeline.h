@@ -35,8 +35,9 @@ typedef struct {
 /* Initialize the TTS pipeline. model_dir should contain safetensors weights
  * and tokenizer files (vocab.json, merges.txt).
  * fp16: if non-zero, store GPU weights as FP16 (half VRAM, uses tensor cores).
+ * int8: if non-zero, store talker weights as INT8 (quarter VRAM vs F32).
  * Returns 0 on success. */
-int tts_pipeline_init(TtsPipeline *tts, const char *model_dir, int fp16, int verbose);
+int tts_pipeline_init(TtsPipeline *tts, const char *model_dir, int fp16, int int8, int verbose);
 
 /* Free all pipeline resources. */
 void tts_pipeline_free(TtsPipeline *tts);

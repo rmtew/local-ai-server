@@ -6,7 +6,8 @@
  *
  * Usage: local-ai-server.exe [--model=<dir>] [--tts-model=<dir>] [--port=N]
  *                             [--language=<lang>] [--threads=N] [--no-fp16]
- *                             [--no-fp16-asr] [--int8-asr] [--verbose] [--help]
+ *                             [--no-fp16-asr] [--int8-asr] [--int8-tts]
+ *                             [--verbose] [--help]
  */
 
 #define _CRT_SECURE_NO_WARNINGS
@@ -67,6 +68,7 @@ static void print_usage(const char *prog) {
     printf("  --no-fp16          Disable TTS FP16 (TTS uses FP16 by default on GPU)\n");
     printf("  --no-fp16-asr      Disable ASR FP16 (ASR uses FP16 by default on GPU)\n");
     printf("  --int8-asr         Use INT8 quantization for ASR decoder weights\n");
+    printf("  --int8-tts         Use INT8 quantization for TTS talker weights\n");
     printf("  --tts-max-steps=<N> Max TTS decode steps (default 200, ~16s audio)\n");
     printf("  --verbose          Enable verbose logging\n");
     printf("  --help             Show this help message\n");
@@ -108,10 +110,12 @@ int main(int argc, char **argv) {
     int tts_fp16 = cfg.tts_fp16 == 0 ? 0 : 1;  /* default ON for GPU builds */
     int asr_fp16 = cfg.asr_fp16 == 0 ? 0 : 1;   /* default ON for GPU builds */
     int asr_int8 = cfg.asr_int8 == 1 ? 1 : 0;   /* default OFF */
+    int tts_int8 = cfg.tts_int8 == 1 ? 1 : 0;   /* default OFF */
 #else
     int tts_fp16 = 0;
     int asr_fp16 = 0;
     int asr_int8 = 0;
+    int tts_int8 = 0;
 #endif
     int tts_max_steps = cfg.tts_max_steps;  /* 0 = use default (TTS_MAX_DECODE_STEPS) */
 
@@ -138,6 +142,8 @@ int main(int argc, char **argv) {
             asr_fp16 = 1;  /* legacy: still accepted */
         } else if (strcmp(argv[i], "--int8-asr") == 0) {
             asr_int8 = 1;
+        } else if (strcmp(argv[i], "--int8-tts") == 0) {
+            tts_int8 = 1;
         } else if ((val = parse_arg(argv[i], "--tts-max-steps")) != NULL) {
             tts_max_steps = atoi(val);
         } else if (strcmp(argv[i], "--help") == 0 || strcmp(argv[i], "-h") == 0) {
@@ -210,6 +216,7 @@ int main(int argc, char **argv) {
 
     /* Load TTS model (optional) */
     TtsPipeline *tts_pipeline = NULL;
+    if (tts_int8) tts_fp16 = 0;  /* INT8 takes priority over FP16 */
     if (tts_model_dir) {
         tts_pipeline = (TtsPipeline *)calloc(1, sizeof(TtsPipeline));
         if (!tts_pipeline) {
@@ -217,7 +224,7 @@ int main(int argc, char **argv) {
             if (asr_ctx) qwen_free(asr_ctx);
             return 1;
         }
-        if (tts_pipeline_init(tts_pipeline, tts_model_dir, tts_fp16, verbose) != 0) {
+        if (tts_pipeline_init(tts_pipeline, tts_model_dir, tts_fp16, tts_int8, verbose) != 0) {
             fprintf(stderr, "Error: failed to load TTS model from %s\n", tts_model_dir);
             free(tts_pipeline);
             if (asr_ctx) qwen_free(asr_ctx);
@@ -305,17 +312,24 @@ int main(int argc, char **argv) {
                        ? (int)((rss_after_tts - rss_before_tts) / (1024 * 1024)) : 0;
 #ifdef USE_CUBLAS
             if (gpu_stats_tts.n_weights > 0) {
-                if (gpu_stats_tts.n_weights_f16 > 0)
+                int vram_mb = (int)(gpu_stats_tts.vram_weights / (1024 * 1024));
+                if (gpu_stats_tts.n_weights_int8 > 0) {
+                    if (gpu_stats_tts.n_weights_f16 > 0)
+                        printf("          %d MB RAM, %d MB VRAM (%d weights: %d F32, %d FP16, %d INT8)\n",
+                               ram_mb, vram_mb, gpu_stats_tts.n_weights,
+                               gpu_stats_tts.n_weights_f32, gpu_stats_tts.n_weights_f16,
+                               gpu_stats_tts.n_weights_int8);
+                    else
+                        printf("          %d MB RAM, %d MB VRAM (%d weights: %d F32, %d INT8)\n",
+                               ram_mb, vram_mb, gpu_stats_tts.n_weights,
+                               gpu_stats_tts.n_weights_f32, gpu_stats_tts.n_weights_int8);
+                } else if (gpu_stats_tts.n_weights_f16 > 0)
                     printf("          %d MB RAM, %d MB VRAM (%d weights: %d F32, %d FP16)\n",
-                           ram_mb,
-                           (int)(gpu_stats_tts.vram_weights / (1024 * 1024)),
-                           gpu_stats_tts.n_weights,
+                           ram_mb, vram_mb, gpu_stats_tts.n_weights,
                            gpu_stats_tts.n_weights_f32, gpu_stats_tts.n_weights_f16);
                 else
                     printf("          %d MB RAM, %d MB VRAM (%d weights, F32)\n",
-                           ram_mb,
-                           (int)(gpu_stats_tts.vram_weights / (1024 * 1024)),
-                           gpu_stats_tts.n_weights);
+                           ram_mb, vram_mb, gpu_stats_tts.n_weights);
             } else
 #endif
                 printf("          %d MB RAM\n", ram_mb);
