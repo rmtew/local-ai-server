@@ -355,7 +355,7 @@ Note: Our numbers are on 100 utterances (not full 2620/2939), so they'll shift w
 
 | Model | F32 | FP16 | INT8 | INT8 Savings vs FP16 |
 |-------|----:|-----:|-----:|---------------------:|
-| 0.6B | 3655 MB | 2207 MB | — | — |
+| 0.6B | 3655 MB | 2207 MB | 1596 MB | **-611 MB (-28%)** |
 | 1.7B | — | 7779 MB | 3822 MB | **-3957 MB (-51%)** |
 
 1.7B INT8 + TTS 0.6B FP16: 3822 + 1278 = **5100 MB** — fits on 8 GB GPU with 3 GB headroom.
