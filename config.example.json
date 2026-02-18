@@ -4,7 +4,6 @@
     "port": 8090,
     "threads": 4,
     "tts_fp16": true,
-    "asr_fp16": true,
-    "asr_int8": false,
+    "asr_int8": true,
     "verbose": false
 }

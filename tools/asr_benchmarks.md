@@ -402,3 +402,11 @@ Apply the same per-row absmax INT8 quantization to TTS talker LM weights. Estima
 - TTS uses its own GPU infrastructure (`tts_native.c`), separate from qwen-asr — INT8 kernels exist in the CUBIN but the upload/dispatch logic needs porting
 - 0.6B savings are marginal (~578 MB) when VRAM is already comfortable; 1.7B is the main beneficiary
 
+### Language Switching on Short Utterances (Known Issue)
+
+When `force_language` is set (e.g. Chinese), the model can still emit tokens from the wrong language on short audio. Example: "我很好" (wǒ hěn hǎo) transcribes as "我 and how" — the model starts in Chinese then switches to English because "很好" sounds like "and how". Observed on both FP16 and INT8, so not a quantization issue. The `"language Chinese"` prompt is a soft hint only; the decoder is unconstrained.
+
+**Approach A — Logit suppression (prevent):** Build a per-language boolean mask over all 151936 vocab tokens at init by scanning `id_to_text` for script membership (e.g. suppress purely-Latin `[a-zA-Z]+` tokens when Chinese is forced). Apply `-inf` to masked logits before the existing CPU argmax loop in `qwen_gpu_argmax_matvec()`. Cost: ~148 KB memory, zero measurable slowdown (folds into existing argmax loop). Precedent: Whisper's `suppress_tokens` mechanism uses the same `-inf` logit pattern.
+
+**Approach B — Post-hoc detection (flag):** After transcription, scan the output UTF-8 string for wrong-script characters and return a warning field (e.g. `"language_mismatch": true`) in the JSON response. Simpler (~30 lines in `handler_asr.c`), lets the client decide to retry or discard.
+
