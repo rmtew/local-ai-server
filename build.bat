@@ -6,6 +6,7 @@ REM Usage: build.bat [target]
 REM   (no target) - build server (default)
 REM   bench       - build vocoder-bench.exe
 REM   ttsbench    - build tts-bench.exe
+REM   ttsdll      - build tts_pipeline.dll (for Python FFI)
 REM   presets     - build voice-presets.exe
 
 setlocal EnableDelayedExpansion
@@ -16,6 +17,7 @@ set TARGET=server
 if /I "%~1"=="bench" set TARGET=bench
 if /I "%~1"=="ttsbench" set TARGET=ttsbench
 if /I "%~1"=="presets" set TARGET=presets
+if /I "%~1"=="ttsdll" set TARGET=ttsdll
 if /I "%~1"=="asrcli" set TARGET=asrcli
 
 REM Auto-setup MSVC environment if not already configured
@@ -147,6 +149,7 @@ set VOC_OBJS="%BUILD_DIR%\tts_vocoder.obj" "%BUILD_DIR%\tts_vocoder_ops.obj" "%B
 REM ---- Target: bench / ttsbench / presets ----
 if /I "%TARGET%"=="bench" goto :build_bench
 if /I "%TARGET%"=="ttsbench" goto :build_ttsbench
+if /I "%TARGET%"=="ttsdll" goto :build_ttsdll
 if /I "%TARGET%"=="presets" goto :build_presets
 if /I "%TARGET%"=="asrcli" goto :build_asrcli
 
@@ -231,6 +234,35 @@ link /nologo /DEBUG /SUBSYSTEM:CONSOLE /OUT:"%BIN_DIR%\tts-bench.exe" %TBENCH_OB
 if %ERRORLEVEL% EQU 0 (
     echo.
     echo Build complete: %BIN_DIR%\tts-bench.exe
+) else (
+    echo.
+    echo Build failed.
+    exit /b 1
+)
+goto :eof
+
+REM ---- Target: ttsdll ----
+:build_ttsdll
+
+REM TTS DLL uses shared TTS sources (no server main/http/handlers) + DLL entry point
+REM Vocoder objs are already compiled above with optimization
+set TDLL_SOURCES=src\tts_dll.c src\tts_pipeline.c src\tts_sampling.c src\tts_native.c src\tts_voice_presets.c src\config.c src\json_reader.c
+
+echo Compiling tts_pipeline.dll...
+cl /nologo /W3 /O2 /arch:AVX2 /fp:fast /DNDEBUG !BLAS_CFLAGS! !CUDA_CFLAGS! /I"%QWEN_ASR_DIR%" /Isrc /c %TDLL_SOURCES% /Fo:"%BUILD_DIR%\\"
+if %ERRORLEVEL% NEQ 0 (
+    echo TTS DLL compilation failed.
+    exit /b 1
+)
+
+set TDLL_OBJS="%BUILD_DIR%\tts_dll.obj" "%BUILD_DIR%\tts_pipeline.obj" "%BUILD_DIR%\tts_sampling.obj" "%BUILD_DIR%\tts_native.obj" "%BUILD_DIR%\tts_voice_presets.obj" "%BUILD_DIR%\config.obj" "%BUILD_DIR%\json_reader.obj"
+
+echo Linking tts_pipeline.dll...
+link /nologo /DLL /OUT:"%BIN_DIR%\tts_pipeline.dll" %TDLL_OBJS% %VOC_OBJS% %QWEN_OBJS% !BLAS_LIBS! !CUDA_LIBS! ws2_32.lib advapi32.lib psapi.lib
+
+if %ERRORLEVEL% EQU 0 (
+    echo.
+    echo Build complete: %BIN_DIR%\tts_pipeline.dll
 ) else (
     echo.
     echo Build failed.

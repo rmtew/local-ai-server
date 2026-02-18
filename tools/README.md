@@ -44,6 +44,16 @@ All scripts expect to be run from the repository root and reference model files 
 |--------|---------|
 | `generate_voice_presets.py` | Generate voice_presets.bin from reference WAV files (Python, requires numpy) |
 
+## In-Process Benchmarks & Exploration (DLL)
+
+These tools load the TTS pipeline directly via `tts_pipeline.dll` (no HTTP server). Build the DLL first: `build.bat ttsdll`.
+
+| Script | Purpose |
+|--------|---------|
+| `tts_pipeline_ffi.py` | Python ctypes wrapper for `tts_pipeline.dll`. Provides `TtsPipeline` class used by the tools below |
+| `tts_benchmark.py` | Performance benchmark: models x quant modes x voices, reports RTF, ms/step, VRAM. `--save` appends to `tts_benchmarks.md` |
+| `tts_explore.py` | Corner-case explorer: sweeps seed x text x voice to find anomalies (max-steps, silence, too-short/long) |
+
 ## Regression & Integration Tests
 
 Run from the repository root. Require a running `local-ai-server` with `--tts-model` loaded.
@@ -53,10 +63,15 @@ Run from the repository root. Require a running `local-ai-server` with `--tts-mo
 | `tts_regression.py` | TTS regression harness: compare output WAVs against references (correlation, SNR). Supports `--stream` for SSE streaming regression |
 | `test_tts_streaming.py` | Standalone SSE streaming protocol test: validates event structure, ordering, base64 audio decode, and byte-identity with non-streaming output |
 | `tts_long_audio_test.py` | Long audio quality analysis: degeneration, entropy, repetition checks at high step counts |
+| `tts_validate.py` | TTS validation harness: server-based anomaly detection and regression checking |
 
 ## Native Tools
 
 Built with `build.bat <target>`. Output in `bin/`.
+
+### tts_pipeline.dll (`build.bat ttsdll`)
+
+Shared library exporting the TTS pipeline C API for Python FFI (ctypes). Used by `tts_benchmark.py` and `tts_explore.py`.
 
 ### vocoder-bench (`build.bat bench`)
 
